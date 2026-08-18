@@ -30,10 +30,6 @@ docker run -p 3000:3000 poketokenbaronline
 
 Vercel: connect the repo (or `vercel deploy`) — `api/index.ts` wraps the same
 Fastify app as a serverless function, and `vercel.json` rewrites all paths to
-it so routes match the self-hosted server. No build step needed on Vercel;
-its Node runtime bundles the function directly.
-
-Note: phase 1 trading needs WebSockets for session push (see PLAN.md), which
-Vercel's serverless Node functions don't support as persistent connections.
-That'll need revisiting when trading lands — self-hosted Docker will keep
-working either way.
+it so routes match the self-hosted server. `public/` is an empty placeholder
+directory — Vercel's zero-config build expects a static output dir to exist
+even for a functions-only project; nothing is actually served from it.
