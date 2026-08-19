@@ -3,12 +3,24 @@ import { registerTradeRoutes, getSession } from "./trades.js";
 
 const GIT_SHA = process.env.GIT_SHA ?? process.env.VERCEL_GIT_COMMIT_SHA ?? "unknown";
 
+// A Poké Ball, inline — served as SVG rather than shipping a binary .ico. Browsers pick the icon
+// format from the response's Content-Type, not the file extension, so an SVG at /favicon.ico works
+// the same as one at /favicon.svg.
+const FAVICON = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+<circle cx="32" cy="32" r="30" fill="#fff" stroke="#1a1a1a" stroke-width="3"/>
+<path d="M2 32a30 30 0 0 1 60 0z" fill="#d63333" stroke="#1a1a1a" stroke-width="3"/>
+<rect x="2" y="29" width="60" height="6" fill="#1a1a1a"/>
+<circle cx="32" cy="32" r="9" fill="#fff" stroke="#1a1a1a" stroke-width="3"/>
+<circle cx="32" cy="32" r="4" fill="#1a1a1a"/>
+</svg>`;
+
 const HOMEPAGE = `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>PokeTokenBarOnline</title>
+<link rel="icon" href="/favicon.ico" type="image/svg+xml">
 <style>
   body { font: 16px/1.5 -apple-system, system-ui, sans-serif; max-width: 40rem; margin: 3rem auto; padding: 0 1rem; color: #1a1a1a; }
   code { background: #f0f0f0; padding: 0.15em 0.4em; border-radius: 4px; }
@@ -55,6 +67,7 @@ function tradeLandingPage(opts: { found: true; deepLink: string; origin: string 
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>PokeTokenBarOnline — Trade</title>
+<link rel="icon" href="/favicon.ico" type="image/svg+xml">
 <style>
   body { font: 16px/1.5 -apple-system, system-ui, sans-serif; max-width: 32rem; margin: 4rem auto; padding: 0 1rem; color: #1a1a1a; text-align: center; }
   code { background: #f0f0f0; padding: 0.15em 0.4em; border-radius: 4px; }
@@ -73,6 +86,8 @@ export function buildApp() {
 
   app.get("/", async (_req, reply) => reply.type("text/html").send(HOMEPAGE));
   app.get("/health", async () => ({ status: "ok" }));
+  app.get("/favicon.ico", async (_req, reply) =>
+    reply.type("image/svg+xml").header("cache-control", "public, max-age=86400").send(FAVICON));
 
   registerTradeRoutes(app);
 
