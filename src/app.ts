@@ -3,7 +3,7 @@ import { registerTradeRoutes, getSession } from "./trades.js";
 
 const GIT_SHA = process.env.GIT_SHA ?? process.env.VERCEL_GIT_COMMIT_SHA ?? "unknown";
 
-// A Poké Ball, inline — served as SVG rather than shipping a binary .ico. Browsers pick the icon
+// A Poké Ball, inline: served as SVG rather than shipping a binary .ico. Browsers pick the icon
 // format from the response's Content-Type, not the file extension, so an SVG at /favicon.ico works
 // the same as one at /favicon.svg.
 const FAVICON = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
@@ -26,6 +26,8 @@ const HOMEPAGE = `<!doctype html>
   code { background: #f0f0f0; padding: 0.15em 0.4em; border-radius: 4px; }
   footer { margin-top: 3rem; color: #666; font-size: 0.85em; }
   a { color: #d63333; }
+  ol, ul { padding-left: 1.3rem; }
+  li { margin: 0.3em 0; }
 </style>
 </head>
 <body>
@@ -34,7 +36,7 @@ const HOMEPAGE = `<!doctype html>
   Optional, self-hostable backend for
   <a href="https://github.com/lukemonaghan/PokeTokenBar">PokeTokenBar</a>,
   a macOS menu bar app that turns AI-coding token usage into a Pokémon
-  companion. PokeTokenBar works entirely offline by default &mdash; this
+  companion. PokeTokenBar works entirely offline by default. This
   server adds trading companions with friends via an invite link.
 </p>
 <p>
@@ -46,6 +48,25 @@ const HOMEPAGE = `<!doctype html>
 <p>
   In PokeTokenBar, go to <strong>Settings &rarr; Online</strong> and enter
   this server's URL, the same way you'd point a game client at a server IP.
+</p>
+<h2>How trading works</h2>
+<p>
+  This server is a broker, not a system of record: no accounts, no
+  database, no ownership ledger. It only pairs two clients for a few
+  minutes and relays whatever they hand it.
+</p>
+<ol>
+  <li><strong>Create.</strong> One person picks a Pokémon to offer; the app opens a session here and gets back a shareable link.</li>
+  <li><strong>Share.</strong> Send the link any way you like; it opens the app directly, or can be pasted into the app's trade screen by hand.</li>
+  <li><strong>Join.</strong> The other person opens (or pastes) the link and offers a Pokémon back.</li>
+  <li><strong>Preview &amp; confirm.</strong> Both sides see what they're getting before committing. Once both confirm, the swap happens on both apps.</li>
+  <li><strong>Expiry.</strong> An unconfirmed trade is forgotten after about 10 minutes.</li>
+</ol>
+<p>
+  Nobody needs an account here; each app generates a random,
+  non-secret id locally the first time you use Online mode, just enough to
+  tell two participants apart for the session. Full protocol and API
+  reference: <a href="https://github.com/lukemonaghan/PokeTokenBarOnline#how-trading-works">README</a>.
 </p>
 <p>Health check: <a href="/health"><code>/health</code></a></p>
 <footer>Build <code>${GIT_SHA.slice(0, 7)}</code></footer>
@@ -66,7 +87,7 @@ function tradeLandingPage(opts: { found: true; deepLink: string; origin: string 
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>PokeTokenBarOnline — Trade</title>
+<title>PokeTokenBarOnline: Trade</title>
 <link rel="icon" href="/favicon.ico" type="image/svg+xml">
 <style>
   body { font: 16px/1.5 -apple-system, system-ui, sans-serif; max-width: 32rem; margin: 4rem auto; padding: 0 1rem; color: #1a1a1a; text-align: center; }
@@ -78,7 +99,7 @@ function tradeLandingPage(opts: { found: true; deepLink: string; origin: string 
 }
 
 export function buildApp() {
-  // trustProxy — Vercel and most self-hosted reverse-proxy setups terminate TLS in front of this
+  // trustProxy: Vercel and most self-hosted reverse-proxy setups terminate TLS in front of this
   // process, so the raw connection looks like plain HTTP. Without this, req.protocol always reports
   // "http" even in production, and the trade landing page would embed the wrong scheme in the
   // server origin it hands back to the client.
@@ -91,7 +112,7 @@ export function buildApp() {
 
   registerTradeRoutes(app);
 
-  // Human-facing landing page for a shared trade link — opens the app via the poketokenbar:// scheme.
+  // Human-facing landing page for a shared trade link; opens the app via the poketokenbar:// scheme.
   // No forced auto-redirect: it either fails silently or shows a contextless OS dialog when the app
   // isn't installed, and hides the fallback instructions. A plain button works either way.
   app.get("/t/:id", async (req, reply) => {
