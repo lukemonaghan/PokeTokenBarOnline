@@ -1,4 +1,5 @@
 import Fastify from "fastify";
+import { registerTradeRoutes, getSession } from "./trades.js";
 
 const GIT_SHA = process.env.GIT_SHA ?? process.env.VERCEL_GIT_COMMIT_SHA ?? "unknown";
 
@@ -39,11 +40,53 @@ const HOMEPAGE = `<!doctype html>
 </body>
 </html>`;
 
+function tradeLandingPage(opts: { found: true; deepLink: string; origin: string } | { found: false }): string {
+  const body = opts.found
+    ? `<h1>Trade invite</h1>
+<p><a href="${opts.deepLink}" style="display:inline-block;padding:0.75rem 1.5rem;background:#d63333;color:#fff;
+   border-radius:8px;text-decoration:none;font-weight:600;">Open in PokeTokenBar</a></p>
+<p>Don't have the app? Open PokeTokenBar &rarr; Settings &rarr; Online, point it at
+   <code>${opts.origin}</code>, then reopen this link.</p>`
+    : `<h1>Trade invite expired</h1>
+<p>This trade link has expired or doesn't exist. Ask your friend for a new one.</p>`;
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PokeTokenBarOnline — Trade</title>
+<style>
+  body { font: 16px/1.5 -apple-system, system-ui, sans-serif; max-width: 32rem; margin: 4rem auto; padding: 0 1rem; color: #1a1a1a; text-align: center; }
+  code { background: #f0f0f0; padding: 0.15em 0.4em; border-radius: 4px; }
+</style>
+</head>
+<body>${body}</body>
+</html>`;
+}
+
 export function buildApp() {
-  const app = Fastify({ logger: true });
+  // trustProxy — Vercel and most self-hosted reverse-proxy setups terminate TLS in front of this
+  // process, so the raw connection looks like plain HTTP. Without this, req.protocol always reports
+  // "http" even in production, and the trade landing page would embed the wrong scheme in the
+  // server origin it hands back to the client.
+  const app = Fastify({ logger: true, trustProxy: true });
 
   app.get("/", async (_req, reply) => reply.type("text/html").send(HOMEPAGE));
   app.get("/health", async () => ({ status: "ok" }));
+
+  registerTradeRoutes(app);
+
+  // Human-facing landing page for a shared trade link — opens the app via the poketokenbar:// scheme.
+  // No forced auto-redirect: it either fails silently or shows a contextless OS dialog when the app
+  // isn't installed, and hides the fallback instructions. A plain button works either way.
+  app.get("/t/:id", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    reply.type("text/html");
+    if (!getSession(id)) return reply.code(404).send(tradeLandingPage({ found: false }));
+    const origin = `${req.protocol}://${req.headers.host}`;
+    const deepLink = `poketokenbar://trade?server=${encodeURIComponent(origin)}&session=${encodeURIComponent(id)}`;
+    return tradeLandingPage({ found: true, deepLink, origin });
+  });
 
   return app;
 }
