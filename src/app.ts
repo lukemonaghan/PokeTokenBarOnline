@@ -66,10 +66,146 @@ const HOMEPAGE = `<!doctype html>
   Nobody needs an account here; each app generates a random,
   non-secret id locally the first time you use Online mode, just enough to
   tell two participants apart for the session. Full protocol and API
-  reference: <a href="https://github.com/lukemonaghan/PokeTokenBarOnline#how-trading-works">README</a>.
+  reference: <a href="/docs">API docs</a>.
 </p>
 <p>Health check: <a href="/health"><code>/health</code></a></p>
 <footer>Build <code>${GIT_SHA.slice(0, 7)}</code></footer>
+</body>
+</html>`;
+
+const DOCS = `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PokeTokenBarOnline: API docs</title>
+<link rel="icon" href="/favicon.ico" type="image/svg+xml">
+<style>
+  body { font: 16px/1.5 -apple-system, system-ui, sans-serif; max-width: 48rem; margin: 3rem auto; padding: 0 1rem; color: #1a1a1a; }
+  code { background: #f0f0f0; padding: 0.15em 0.4em; border-radius: 4px; }
+  pre { background: #f0f0f0; padding: 1rem; border-radius: 4px; overflow-x: auto; font-size: 0.85em; }
+  pre code { background: none; padding: 0; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+  th, td { text-align: left; padding: 0.4em 0.6em; border-bottom: 1px solid #ddd; vertical-align: top; }
+  a { color: #d63333; }
+  h2 { margin-top: 2.5rem; }
+</style>
+</head>
+<body>
+<h1>PokeTokenBarOnline API</h1>
+<p>
+  This server is a trade broker, not a system of record: no accounts, no
+  database, no ownership ledger. It pairs two clients for up to 10 minutes
+  and relays whatever they hand it; the client owns all game logic.
+  Trust model: holding the right <code>uuid</code> for a session is the
+  entire authentication story &mdash; deliberately, since the stakes are low.
+</p>
+
+<h2>Endpoints</h2>
+<table>
+<tr><th>Method</th><th>Path</th><th>Body / query</th><th>Response</th></tr>
+<tr><td>GET</td><td><code>/health</code></td><td>&mdash;</td><td><code>{ status: "ok" }</code></td></tr>
+<tr><td>POST</td><td><code>/trades</code></td><td><code>{ uuid, displayName, pokemon }</code></td><td><code>{ sessionId }</code></td></tr>
+<tr><td>POST</td><td><code>/trades/:id/join</code></td><td><code>{ uuid, displayName, pokemon }</code></td><td><code>{ status }</code></td></tr>
+<tr><td>GET</td><td><code>/trades/:id?uuid=</code></td><td>query <code>uuid</code></td><td><code>{ status, counterpart }</code></td></tr>
+<tr><td>POST</td><td><code>/trades/:id/confirm</code></td><td><code>{ uuid }</code></td><td><code>{ status }</code></td></tr>
+<tr><td>GET</td><td><code>/t/:id</code></td><td>&mdash;</td><td>HTML landing page with the <code>poketokenbar://</code> deep link.</td></tr>
+</table>
+<p>
+  <code>uuid</code> is a random id each app generates locally on first use of
+  Online mode &mdash; not a login, just enough to tell two participants
+  apart. <code>pokemon</code> is opaque JSON: the server never reads it, so
+  the client's save format can change without a server release.
+</p>
+<p>
+  Errors are a JSON body <code>{ error: string }</code> with a matching HTTP
+  status: <code>400</code> malformed offer, <code>403</code> wrong/missing
+  <code>uuid</code> for the session, <code>404</code> unknown or expired
+  session, <code>409</code> action doesn't fit the session's current state
+  (e.g. joining a full session, confirming before both sides have offered).
+</p>
+
+<h2>Session states</h2>
+<pre><code>  POST /trades
+       |
+       v
+     open  --join--&gt;  offered  --both confirm--&gt;  completed
+       |                  |
+       |                  | (10 min idle, either state)
+       v                  v
+    (forgotten)       (forgotten)
+</code></pre>
+
+<h2>Trade handshake</h2>
+<p>Full flow for two clients, A (creator) and B (joiner):</p>
+<pre><code>Client A                      Server                      Client B
+   |                             |                             |
+   |--- POST /trades ----------->|                             |
+   |    {uuid:A, pokemon}        |                             |
+   |&lt;-- {sessionId} -------------|                             |
+   |                             |                             |
+   |--- share https://server/t/:sessionId (or deep link) ----->|
+   |                             |                             |
+   |                             |&lt;-- POST /trades/:id/join ---|
+   |                             |    {uuid:B, pokemon}        |
+   |                             |--- {status:"offered"} ----->|
+   |                             |                             |
+   |--- GET /trades/:id?uuid=A ->|                             |
+   |&lt;-- {status, counterpart:B}--|                             |
+   |                             |&lt;-- GET /trades/:id?uuid=B --|
+   |                             |--- {status, counterpart:A}->|
+   |          (both sides render a preview of what they'd get) |
+   |                             |                             |
+   |--- POST /trades/:id/confirm>|                             |
+   |    {uuid:A}                 |                             |
+   |&lt;-- {status:"offered"} ------|                             |
+   |                             |&lt;-- POST /trades/:id/confirm-|
+   |                             |    {uuid:B}                 |
+   |                             |--- {status:"completed"} --->|
+   |                             |                             |
+   |   both apps see "completed" on their next poll and apply  |
+   |   the swap locally (remove mine, add theirs), idempotently|
+</code></pre>
+<p>
+  Confirm is a two-phase commit: it only flips to <code>completed</code> once
+  <em>both</em> uuids have called <code>/confirm</code>, and stays
+  <code>completed</code> on every later poll so a client that was offline
+  when it happened still catches up. Applying the result is the client's
+  job, done idempotently since a stray poll can land after the swap already
+  happened locally.
+</p>
+
+<h2>Invite link handshake</h2>
+<p>How <code>GET /t/:id</code> hands off from browser to app:</p>
+<pre><code>Client A                Server                  OS / Client B's device
+   |                       |                              |
+   |-- POST /trades ------>|                              |
+   |&lt;- {sessionId} --------|                              |
+   |                       |                              |
+   |  A sends link "https://server/t/:sessionId" to B (any channel)
+   |                       |                              |
+   |                       |&lt;-- GET /t/:sessionId --------|
+   |                       |                              |
+   |                       |  session exists? ----yes---->| render button:
+   |                       |                              |  poketokenbar://trade
+   |                       |                              |  ?server=...&session=...
+   |                       |                              |
+   |                       |                              | tap button --> OS opens
+   |                       |                              | PokeTokenBar via custom
+   |                       |                              | scheme, app calls
+   |                       |                              | POST /trades/:id/join
+   |                       |                              |
+   |                       |  session missing/expired --->| 404 page: "ask for a
+   |                       |                              |  new link"
+</code></pre>
+<p>
+  If the OS has no handler registered for <code>poketokenbar://</code> (app
+  not installed, or an unsupported platform), the button silently does
+  nothing or shows a contextless OS dialog. The landing page's fallback text
+  covers that case: open the app manually and paste the link or session id.
+</p>
+
+<p><a href="/">&larr; Back</a></p>
 </body>
 </html>`;
 
@@ -106,6 +242,7 @@ export function buildApp() {
   const app = Fastify({ logger: true, trustProxy: true });
 
   app.get("/", async (_req, reply) => reply.type("text/html").send(HOMEPAGE));
+  app.get("/docs", async (_req, reply) => reply.type("text/html").send(DOCS));
   app.get("/health", async () => ({ status: "ok" }));
   app.get("/favicon.ico", async (_req, reply) =>
     reply.type("image/svg+xml").header("cache-control", "public, max-age=86400").send(FAVICON));

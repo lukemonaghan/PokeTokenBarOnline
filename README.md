@@ -63,6 +63,7 @@ client's save format can change without a server release.
 | GET    | `/trades/:id?uuid=`  | Poll status (`open`/`offered`/`completed`) + the counterpart's offer once both sides are in. |
 | POST   | `/trades/:id/confirm`| Confirm your side. Requires `uuid` in the body.       |
 | GET    | `/t/:id`             | Human-facing landing page for a shared invite link.   |
+| GET    | `/docs`              | Rendered API reference with handshake sequence diagrams. |
 
 ## Stack
 
