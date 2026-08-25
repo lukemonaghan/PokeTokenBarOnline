@@ -1,5 +1,6 @@
 import Fastify from "fastify";
 import { registerTradeRoutes, getSession } from "./trades.js";
+import { registerBattleRoutes } from "./battles.js";
 
 const GIT_SHA = process.env.GIT_SHA ?? process.env.VERCEL_GIT_COMMIT_SHA ?? "unknown";
 
@@ -110,12 +111,39 @@ const DOCS = `<!doctype html>
 <tr><td>GET</td><td><code>/trades/:id?uuid=</code></td><td>query <code>uuid</code></td><td><code>{ status, counterpart }</code></td></tr>
 <tr><td>POST</td><td><code>/trades/:id/confirm</code></td><td><code>{ uuid }</code></td><td><code>{ status }</code></td></tr>
 <tr><td>GET</td><td><code>/t/:id</code></td><td>&mdash;</td><td>HTML landing page with the <code>poketokenbar://</code> deep link.</td></tr>
+<tr><td>POST</td><td><code>/battles</code></td><td><code>{ uuid, displayName, party }</code></td><td><code>{ sessionId }</code></td></tr>
+<tr><td>POST</td><td><code>/battles/:id/join</code></td><td><code>{ uuid, displayName, party }</code></td><td><code>{ status }</code></td></tr>
+<tr><td>GET</td><td><code>/battles/:id?uuid=</code></td><td>query <code>uuid</code></td><td><code>{ status, turn, pendingChoice, you, opponent, log, result }</code></td></tr>
+<tr><td>POST</td><td><code>/battles/:id/choose</code></td><td><code>{ uuid, choice }</code></td><td>same shape as the GET above</td></tr>
 </table>
 <p>
   <code>uuid</code> is a random id each app generates locally on first use of
   Online mode &mdash; not a login, just enough to tell two participants
   apart. <code>pokemon</code> is opaque JSON: the server never reads it, so
   the client's save format can change without a server release.
+</p>
+
+<h2>Battles</h2>
+<p>
+  Unlike trading, this server doesn't just relay a battle &mdash; it
+  arbitrates it. <code>party</code> is 1&ndash;6 mons as verifiable
+  primitives (species id, level, nature, ability, IVs, EVs, up to 4 moves),
+  never a precomputed stat block; the server derives real stats and runs the
+  fight itself via <a href="https://github.com/pkmn/ps"><code>@pkmn/sim</code></a>
+  (Pok&eacute;mon Showdown's own battle engine), the same way it never trusts
+  a client-reported result for anything that decides an outcome. Turn flow:
+  each side <code>POST</code>s a <code>choice</code> (<code>"move N"</code> or
+  <code>"switch N"</code>, 1-indexed into that side's own roster) once per
+  turn; the server resolves the turn once both are in and both clients pick
+  up the result on their next poll (or from the response to their own
+  <code>choose</code> call). <code>pendingChoice</code> flips to
+  <code>"switch"</code> when a fainted mon forces one. Only the opponent's
+  active mon is visible in <code>opponent</code> &mdash; their bench stays
+  hidden. Sessions expire after 5 minutes of no <code>choose</code> call
+  (sliding, not fixed from creation, since a full team battle runs longer
+  than a trade). <strong>Self-hosting only</strong>: <code>POST /battles</code>
+  refuses with <code>501</code> when running on Vercel &mdash; see the main
+  README's "Battles require self-hosting" section.
 </p>
 <p>
   Errors are a JSON body <code>{ error: string }</code> with a matching HTTP
@@ -248,6 +276,7 @@ export function buildApp() {
     reply.type("image/svg+xml").header("cache-control", "public, max-age=86400").send(FAVICON));
 
   registerTradeRoutes(app);
+  registerBattleRoutes(app);
 
   // Human-facing landing page for a shared trade link; opens the app via the poketokenbar:// scheme.
   // No forced auto-redirect: it either fails silently or shows a contextless OS dialog when the app

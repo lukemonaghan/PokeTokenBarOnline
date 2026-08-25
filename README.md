@@ -92,3 +92,12 @@ instance, and the trade would silently never pair up. Fine for casual use
 and for the homepage/health check regardless; if you want trading to be
 reliable under real load, self-host as a single long-lived process (Docker,
 a small VPS) instead.
+
+**Battles require self-hosting.** Same in-memory-session limitation as
+trading, but a battle session lives for dozens of polls/choices over
+several minutes instead of trading's ~4-request handshake — far more
+chances to land on the wrong instance, and losing mid-battle is worse than
+losing mid-handshake (a real fight several turns deep just vanishes).
+`POST /battles` refuses with `501` when `process.env.VERCEL` is set, rather
+than let that happen silently. Run this as a single long-lived process
+(Docker, a small VPS) if you want battle mode to work at all.
