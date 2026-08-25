@@ -12,6 +12,7 @@
   "dependencies": {
     "@pkmn/sim": "^0.10.11",
     "@pkmn/types": "^4.0.0",
+    "@upstash/redis": "^1.38.2",
     "fastify": "^5.0.0"
   },
   "devDependencies": {

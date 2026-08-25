@@ -97,6 +97,22 @@ test("a whole roster fainting ends the battle with a win/loss result on each sid
   assert.equal(pollA.json().result, "loss");
 });
 
+test("concurrent choose calls from both sides don't clobber each other", async () => {
+  // The whole reason the session store splits into a separate atomically-appendable log (see
+  // sessionStore.ts) instead of one read-modify-write JSON blob: both players routinely submit
+  // their turn's choice around the same moment, and a naive read-modify-write would silently drop
+  // whichever side's write lost the race, leaving the battle stuck waiting for a choice it
+  // actually already received.
+  const app = buildApp();
+  const { sessionId } = await createAndJoin(app, [bulbasaur()], [charmander()]);
+  await Promise.all([
+    app.inject({ method: "POST", url: `/battles/${sessionId}/choose`, payload: { uuid: "uuid-a", choice: "move 1" } }),
+    app.inject({ method: "POST", url: `/battles/${sessionId}/choose`, payload: { uuid: "uuid-b", choice: "move 1" } }),
+  ]);
+  const poll = await app.inject({ method: "GET", url: `/battles/${sessionId}?uuid=uuid-a` });
+  assert.equal(poll.json().turn, 2, "both sides' choices should have been recorded, resolving turn 1");
+});
+
 test("rejects an empty or oversized roster", async () => {
   const app = buildApp();
   const empty = await app.inject({ method: "POST", url: "/battles", payload: { uuid: "u", displayName: "X", party: [] } });

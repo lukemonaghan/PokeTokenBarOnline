@@ -93,11 +93,25 @@ and for the homepage/health check regardless; if you want trading to be
 reliable under real load, self-host as a single long-lived process (Docker,
 a small VPS) instead.
 
-**Battles require self-hosting.** Same in-memory-session limitation as
-trading, but a battle session lives for dozens of polls/choices over
-several minutes instead of trading's ~4-request handshake — far more
-chances to land on the wrong instance, and losing mid-battle is worse than
-losing mid-handshake (a real fight several turns deep just vanishes).
-`POST /battles` refuses with `501` when `process.env.VERCEL` is set, rather
-than let that happen silently. Run this as a single long-lived process
-(Docker, a small VPS) if you want battle mode to work at all.
+**Battles need either self-hosting or Redis.** Same in-memory-session
+limitation as trading, but a battle session lives for dozens of
+polls/choices over several minutes instead of trading's ~4-request
+handshake — far more chances to land on the wrong instance, and losing
+mid-battle is worse than losing mid-handshake (a real fight several turns
+deep just vanishes). Two ways to make it work:
+
+- **Self-host** (Docker, a small VPS) — the original in-memory approach is
+  fine as long as it's one process.
+- **On Vercel, add the [Upstash Redis](https://vercel.com/marketplace/upstash)
+  Marketplace integration** and connect it to this project. Battle session
+  state (roster, PRNG seed, each side's turn choices) then lives in Redis
+  instead of process memory, reachable from every instance. The `Battle`
+  engine object itself is never stored — it's cheaply rebuilt on every
+  request by replaying the stored choices against a fresh instance seeded
+  identically (`@pkmn/sim` is deterministic given the same seed + inputs),
+  so there's nothing large or hard-to-serialize going over the wire.
+  Upstash's free tier (500K commands/month, no card required) comfortably
+  covers casual use — see `src/sessionStore.ts`.
+
+Without either, `POST /battles` refuses with `501` on Vercel rather than
+let a battle silently vanish mid-fight.

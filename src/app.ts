@@ -141,9 +141,10 @@ const DOCS = `<!doctype html>
   active mon is visible in <code>opponent</code> &mdash; their bench stays
   hidden. Sessions expire after 5 minutes of no <code>choose</code> call
   (sliding, not fixed from creation, since a full team battle runs longer
-  than a trade). <strong>Self-hosting only</strong>: <code>POST /battles</code>
-  refuses with <code>501</code> when running on Vercel &mdash; see the main
-  README's "Battles require self-hosting" section.
+  than a trade). <strong>Self-host, or add Redis</strong>: on Vercel,
+  <code>POST /battles</code> refuses with <code>501</code> unless the
+  Upstash Redis Marketplace integration is connected &mdash; see the main
+  README's "Battles need either self-hosting or Redis" section.
 </p>
 <p>
   Errors are a JSON body <code>{ error: string }</code> with a matching HTTP
