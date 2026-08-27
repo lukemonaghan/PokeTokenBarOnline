@@ -33,12 +33,30 @@ const redisClient = redisConfigured ? Redis.fromEnv() : undefined;
  * routinely submit around the same moment — that's the normal case for a turn-based battle, not
  * an edge case — so a naive read-modify-write over one JSON blob would silently drop whichever
  * side's choice lost the race. `appendLog` is a real atomic append instead.
+ *
+ * The `*Set` methods are a second, general-purpose atomic primitive (unordered, deduped — unlike
+ * `log`, which is ordered and allows repeats), used for two different things with two different
+ * TTL needs:
+ *   - the open-lobby index: one well-known `setKey` (`"open"`) per namespace, holding every
+ *     session id still waiting for a second player. This is a persistent registry, not scoped to
+ *     any one session's life, so it's never given a TTL of its own (`ttlMs` omitted) — stale
+ *     entries (sessions that expired without being joined) are pruned lazily by the browse
+ *     handler checking real session existence, the same lazy-expiry spirit as everything else
+ *     here.
+ *   - in `trades.ts`, a session's `confirmedBy` (`setKey` = that session's id + `":confirmed"`):
+ *     scoped to one session, so it's given the same remaining `ttlMs` as that session's `meta` so
+ *     it expires alongside it rather than outliving it as an orphaned key.
+ * Both need "add a member without clobbering a concurrent add" — the same concurrency shape `log`
+ * solves for battle choices, e.g. two players hitting "confirm" around the same moment.
  */
 export interface SessionStore<Meta> {
   loadMeta(id: string): Promise<Meta | undefined>;
   saveMeta(id: string, meta: Meta, ttlMs: number): Promise<void>;
   appendLog(id: string, entry: string, ttlMs: number): Promise<void>;
   loadLog(id: string): Promise<string[]>;
+  addToSet(setKey: string, member: string, ttlMs?: number): Promise<void>;
+  removeFromSet(setKey: string, member: string): Promise<void>;
+  setMembers(setKey: string): Promise<string[]>;
 }
 
 /** Self-host/dev/test default — same in-process behavior this app always had, just behind the
@@ -46,6 +64,7 @@ export interface SessionStore<Meta> {
 class MemoryStore<Meta> implements SessionStore<Meta> {
   private readonly meta = new Map<string, { value: Meta; expiresAt: number }>();
   private readonly log = new Map<string, string[]>();
+  private readonly sets = new Map<string, Set<string>>();
 
   async loadMeta(id: string): Promise<Meta | undefined> {
     const entry = this.meta.get(id);
@@ -73,6 +92,20 @@ class MemoryStore<Meta> implements SessionStore<Meta> {
   async loadLog(id: string): Promise<string[]> {
     return this.log.get(id) ?? [];
   }
+
+  async addToSet(setKey: string, member: string, _ttlMs?: number): Promise<void> {
+    const set = this.sets.get(setKey) ?? new Set<string>();
+    set.add(member);
+    this.sets.set(setKey, set);
+  }
+
+  async removeFromSet(setKey: string, member: string): Promise<void> {
+    this.sets.get(setKey)?.delete(member);
+  }
+
+  async setMembers(setKey: string): Promise<string[]> {
+    return [...(this.sets.get(setKey) ?? [])];
+  }
 }
 
 /** Shared, reachable from every Vercel instance — this is what actually fixes the multi-instance
@@ -82,6 +115,7 @@ class RedisStore<Meta> implements SessionStore<Meta> {
 
   private metaKey(id: string): string { return `${this.prefix}${id}:meta`; }
   private logKey(id: string): string { return `${this.prefix}${id}:log`; }
+  private setKeyFull(setKey: string): string { return `${this.prefix}${setKey}:set`; }
 
   async loadMeta(id: string): Promise<Meta | undefined> {
     const value = await this.redis.get<Meta>(this.metaKey(id));
@@ -101,6 +135,20 @@ class RedisStore<Meta> implements SessionStore<Meta> {
 
   async loadLog(id: string): Promise<string[]> {
     return this.redis.lrange<string>(this.logKey(id), 0, -1);
+  }
+
+  async addToSet(setKey: string, member: string, ttlMs?: number): Promise<void> {
+    // SADD is atomic — safe when two calls (e.g. both players confirming a trade) land together.
+    await this.redis.sadd(this.setKeyFull(setKey), member);
+    if (ttlMs !== undefined) await this.redis.pexpire(this.setKeyFull(setKey), ttlMs);
+  }
+
+  async removeFromSet(setKey: string, member: string): Promise<void> {
+    await this.redis.srem(this.setKeyFull(setKey), member);
+  }
+
+  async setMembers(setKey: string): Promise<string[]> {
+    return this.redis.smembers(this.setKeyFull(setKey));
   }
 }
 

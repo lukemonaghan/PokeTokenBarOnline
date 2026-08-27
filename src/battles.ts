@@ -41,9 +41,18 @@ interface SessionMeta {
   a: RosterSide;
   b?: RosterSide;
   seed?: PRNGSeed;
+  createdAt: number;
 }
 
 const store = createSessionStore<SessionMeta>("battle:");
+
+/** Sessions still waiting for a second player — every id here is browsable via `GET
+ * /battles/open` as an alternative to sharing a link. Kept in sync explicitly (added at create,
+ * removed at join) rather than derived by scanning every session, which Redis has no cheap way to
+ * do; a stale id (its session expired before ever being joined) is pruned lazily the next time
+ * someone browses, the same lazy-expiry spirit as everything else in this file. */
+const OPEN_INDEX_KEY = "open";
+const MAX_OPEN_LISTED = 50;
 
 function packEntry(side: "p1" | "p2", choice: string): string {
   return `${side}:${choice}`;
@@ -206,8 +215,32 @@ export function registerBattleRoutes(app: FastifyInstance): void {
     const unknown = req.body.party.find((m) => !hasSpecies(m.speciesID));
     if (unknown) return reply.code(400).send({ error: `unknown species ${unknown.speciesID}` });
     const id = randomUUID();
-    await store.saveMeta(id, { a: { uuid: req.body.uuid, displayName: req.body.displayName, primitives: req.body.party } }, IDLE_TTL_MS);
+    await store.saveMeta(id, {
+      a: { uuid: req.body.uuid, displayName: req.body.displayName, primitives: req.body.party },
+      createdAt: Date.now(),
+    }, IDLE_TTL_MS);
+    await store.addToSet(OPEN_INDEX_KEY, id);
     return { sessionId: id };
+  });
+
+  // Lists sessions still waiting for a second player — the alternative to sharing a link. Reads
+  // every open id's meta both to render the listing and to lazily prune ones whose session
+  // already expired without ever being joined (see `OPEN_INDEX_KEY`'s comment).
+  app.get("/battles/open", async () => {
+    const ids = await store.setMembers(OPEN_INDEX_KEY);
+    const entries: { sessionId: string; displayName: string; rosterSize: number; createdAt: number }[] = [];
+    for (const id of ids) {
+      const meta = await store.loadMeta(id);
+      if (!meta || meta.b) {
+        // Expired without being joined, or joined through a path that didn't reach the
+        // removeFromSet below (defensive) — either way it doesn't belong in the open list.
+        await store.removeFromSet(OPEN_INDEX_KEY, id);
+        continue;
+      }
+      entries.push({ sessionId: id, displayName: meta.a.displayName, rosterSize: meta.a.primitives.length, createdAt: meta.createdAt });
+    }
+    entries.sort((a, b) => b.createdAt - a.createdAt);
+    return { battles: entries.slice(0, MAX_OPEN_LISTED) };
   });
 
   app.post("/battles/:id/join", async (req, reply) => {
@@ -252,8 +285,9 @@ export function registerBattleRoutes(app: FastifyInstance): void {
       }
     }
 
-    await store.saveMeta(id, { a: meta.a, b: bSide, seed: battle.prngSeed }, IDLE_TTL_MS);
+    await store.saveMeta(id, { a: meta.a, b: bSide, seed: battle.prngSeed, createdAt: meta.createdAt }, IDLE_TTL_MS);
     for (const entry of teamPreviewEntries) await store.appendLog(id, entry, IDLE_TTL_MS);
+    await store.removeFromSet(OPEN_INDEX_KEY, id);
     return { status: "active" };
   });
 

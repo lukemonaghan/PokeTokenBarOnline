@@ -98,6 +98,36 @@ test("a whole roster fainting ends the battle with a win/loss result on each sid
   assert.equal(pollA.json().result, "loss");
 });
 
+test("an open battle is listed for browsing before a join, and drops off after", async () => {
+  // The store's open-lobby index is a process/instance-wide singleton (module-level, shared by
+  // every test in this run), so assert on presence of this test's own session rather than an
+  // exact listing — other tests' sessions may legitimately still be in there too.
+  const app = buildApp();
+  const create = await app.inject({
+    method: "POST",
+    url: "/battles",
+    payload: { uuid: "uuid-open-a", displayName: "Waiting", party: [bulbasaur(), squirtle()] },
+  });
+  const { sessionId } = create.json();
+
+  const beforeJoin = await app.inject({ method: "GET", url: "/battles/open" });
+  const before = beforeJoin.json().battles as { sessionId: string; displayName: string; rosterSize: number }[];
+  const entry = before.find((b) => b.sessionId === sessionId);
+  assert.ok(entry, "the just-created session should be in the open list");
+  assert.equal(entry!.displayName, "Waiting");
+  assert.equal(entry!.rosterSize, 2);
+
+  await app.inject({
+    method: "POST",
+    url: `/battles/${sessionId}/join`,
+    payload: { uuid: "uuid-open-b", displayName: "Joiner", party: [charmander()] },
+  });
+
+  const afterJoin = await app.inject({ method: "GET", url: "/battles/open" });
+  const after = afterJoin.json().battles as { sessionId: string }[];
+  assert.ok(!after.some((b) => b.sessionId === sessionId), "a joined session should no longer be listed as open");
+});
+
 test("concurrent choose calls from both sides don't clobber each other", async () => {
   // The whole reason the session store splits into a separate atomically-appendable log (see
   // sessionStore.ts) instead of one read-modify-write JSON blob: both players routinely submit

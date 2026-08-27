@@ -107,11 +107,13 @@ const DOCS = `<!doctype html>
 <tr><th>Method</th><th>Path</th><th>Body / query</th><th>Response</th></tr>
 <tr><td>GET</td><td><code>/health</code></td><td>&mdash;</td><td><code>{ status: "ok" }</code></td></tr>
 <tr><td>POST</td><td><code>/trades</code></td><td><code>{ uuid, displayName, pokemon }</code></td><td><code>{ sessionId }</code></td></tr>
+<tr><td>GET</td><td><code>/trades/open</code></td><td>&mdash;</td><td><code>{ trades: [{ sessionId, displayName, pokemon, createdAt }] }</code></td></tr>
 <tr><td>POST</td><td><code>/trades/:id/join</code></td><td><code>{ uuid, displayName, pokemon }</code></td><td><code>{ status }</code></td></tr>
 <tr><td>GET</td><td><code>/trades/:id?uuid=</code></td><td>query <code>uuid</code></td><td><code>{ status, counterpart }</code></td></tr>
 <tr><td>POST</td><td><code>/trades/:id/confirm</code></td><td><code>{ uuid }</code></td><td><code>{ status }</code></td></tr>
 <tr><td>GET</td><td><code>/t/:id</code></td><td>&mdash;</td><td>HTML landing page with the <code>poketokenbar://</code> deep link.</td></tr>
 <tr><td>POST</td><td><code>/battles</code></td><td><code>{ uuid, displayName, party }</code></td><td><code>{ sessionId }</code></td></tr>
+<tr><td>GET</td><td><code>/battles/open</code></td><td>&mdash;</td><td><code>{ battles: [{ sessionId, displayName, rosterSize, createdAt }] }</code></td></tr>
 <tr><td>POST</td><td><code>/battles/:id/join</code></td><td><code>{ uuid, displayName, party }</code></td><td><code>{ status }</code></td></tr>
 <tr><td>GET</td><td><code>/battles/:id?uuid=</code></td><td>query <code>uuid</code></td><td><code>{ status, turn, pendingChoice, you, opponent, log, result }</code></td></tr>
 <tr><td>POST</td><td><code>/battles/:id/choose</code></td><td><code>{ uuid, choice }</code></td><td>same shape as the GET above</td></tr>
@@ -121,6 +123,16 @@ const DOCS = `<!doctype html>
   Online mode &mdash; not a login, just enough to tell two participants
   apart. <code>pokemon</code> is opaque JSON: the server never reads it, so
   the client's save format can change without a server release.
+</p>
+<p>
+  <strong>Two ways to find an opponent</strong>, for both trades and
+  battles: share the <code>/t/:id</code> link (or its battle equivalent,
+  the deep link returned alongside <code>sessionId</code>) directly with a
+  specific person, or skip that and browse <code>GET /trades/open</code> /
+  <code>GET /battles/open</code> &mdash; every session still waiting for a
+  second player, newest first, capped at 50. A session drops off that list
+  the instant someone joins it, and off it entirely once its own TTL
+  elapses without ever being joined.
 </p>
 
 <h2>Battles</h2>
@@ -285,7 +297,7 @@ export function buildApp() {
   app.get("/t/:id", async (req, reply) => {
     const { id } = req.params as { id: string };
     reply.type("text/html");
-    if (!getSession(id)) return reply.code(404).send(tradeLandingPage({ found: false }));
+    if (!(await getSession(id))) return reply.code(404).send(tradeLandingPage({ found: false }));
     const origin = `${req.protocol}://${req.headers.host}`;
     const deepLink = `poketokenbar://trade?server=${encodeURIComponent(origin)}&session=${encodeURIComponent(id)}`;
     return tradeLandingPage({ found: true, deepLink, origin });
