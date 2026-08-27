@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { buildApp } from "./app.js";
+import { redisConfigured } from "./sessionStore.js";
 
 // node:test + Fastify's built-in .inject() — no supertest, no test framework dependency, matches
 // this repo's "no database, minimal deps" stance. Each test creates its own session (random uuid
@@ -158,12 +159,15 @@ test("a non-participant can't poll or submit a choice", async () => {
   assert.equal(choose.statusCode, 403);
 });
 
-test("refuses to create a battle when running on Vercel (in-memory sessions can't survive its multi-instance scaling)", async () => {
+test("on Vercel, refuses to create a battle unless Redis is configured", async () => {
+  // Whether this environment has real Redis credentials (a local .env with Upstash creds, say)
+  // determines which branch is actually exercised here — checked against the same flag the route
+  // itself reads, rather than assuming "no Redis" the way a CI/sandboxed run would have it.
   const app = buildApp();
   process.env.VERCEL = "1";
   try {
     const res = await app.inject({ method: "POST", url: "/battles", payload: { uuid: "u", displayName: "X", party: [bulbasaur()] } });
-    assert.equal(res.statusCode, 501);
+    assert.equal(res.statusCode, redisConfigured ? 200 : 501);
   } finally {
     delete process.env.VERCEL;
   }

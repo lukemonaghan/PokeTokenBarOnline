@@ -4,10 +4,10 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "tsx watch src/index.ts",
+    "dev": "node --env-file-if-exists=.env node_modules/.bin/tsx watch src/index.ts",
     "build": "tsc",
     "start": "node dist/index.js",
-    "test": "tsx --test src/*.test.ts"
+    "test": "node --env-file-if-exists=.env node_modules/.bin/tsx --test src/*.test.ts"
   },
   "dependencies": {
     "@pkmn/sim": "^0.10.11",
