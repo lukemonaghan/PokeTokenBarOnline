@@ -7,7 +7,8 @@
     "dev": "node --env-file-if-exists=.env node_modules/.bin/tsx watch src/index.ts",
     "build": "tsc",
     "start": "node dist/index.js",
-    "test": "node --env-file-if-exists=.env node_modules/.bin/tsx --test src/*.test.ts"
+    "test": "SESSION_STORE=memory node node_modules/.bin/tsx --test src/*.test.ts",
+    "test:integration": "SESSION_STORE=redis node --env-file-if-exists=.env node_modules/.bin/tsx --test src/*.test.ts"
   },
   "dependencies": {
     "@pkmn/sim": "^0.10.11",

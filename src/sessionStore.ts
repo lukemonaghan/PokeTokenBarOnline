@@ -4,10 +4,25 @@ import { Redis } from "@upstash/redis";
  * Redis configured" without constructing a client first (`fromEnv()` never throws on missing
  * vars, it just warns and builds a client that fails at request time). Vercel's Upstash
  * Marketplace integration injects one of these two pairs depending on how it was provisioned. */
-export const redisConfigured = Boolean(
+const hasRedisCreds = Boolean(
   (process.env.UPSTASH_REDIS_REST_URL || process.env.KV_REST_API_URL) &&
   (process.env.UPSTASH_REDIS_REST_TOKEN || process.env.KV_REST_API_TOKEN),
 );
+
+/** `SESSION_STORE` lets a caller override the auto-detected backend — `npm test` sets `memory` so
+ * local/CI runs stay fast and network-free even with real credentials sitting in `.env`; `npm run
+ * test:integration` sets `redis` so it fails loudly on missing credentials instead of silently
+ * downgrading to memory and reporting green for a check it didn't actually run. Unset (normal dev,
+ * production) keeps today's auto-detect: Redis if configured, memory otherwise. */
+const requestedStore = process.env.SESSION_STORE;
+if (requestedStore === "redis" && !hasRedisCreds) {
+  throw new Error(
+    "SESSION_STORE=redis was requested but no Upstash credentials were found " +
+    "(UPSTASH_REDIS_REST_URL/TOKEN or KV_REST_API_URL/TOKEN) — see PokeTokenBarOnline/README.md",
+  );
+}
+
+export const redisConfigured = requestedStore === "memory" ? false : requestedStore === "redis" ? true : hasRedisCreds;
 
 const redisClient = redisConfigured ? Redis.fromEnv() : undefined;
 
