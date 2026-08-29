@@ -189,6 +189,62 @@ test("a non-participant can't poll or submit a choice", async () => {
   assert.equal(choose.statusCode, 403);
 });
 
+test("leaving before an opponent joins fully removes the session", async () => {
+  const app = buildApp();
+  const create = await app.inject({
+    method: "POST",
+    url: "/battles",
+    payload: { uuid: "uuid-a", displayName: "Ash", party: [bulbasaur()] },
+  });
+  const { sessionId } = create.json();
+
+  const openBefore = await app.inject({ method: "GET", url: "/battles/open" });
+  assert.ok(openBefore.json().battles.some((b: { sessionId: string }) => b.sessionId === sessionId));
+
+  const leave = await app.inject({ method: "POST", url: `/battles/${sessionId}/leave`, payload: { uuid: "uuid-a" } });
+  assert.equal(leave.statusCode, 200);
+  assert.equal(leave.json().status, "removed");
+
+  const poll = await app.inject({ method: "GET", url: `/battles/${sessionId}?uuid=uuid-a` });
+  assert.equal(poll.statusCode, 404);
+
+  const openAfter = await app.inject({ method: "GET", url: "/battles/open" });
+  assert.ok(!openAfter.json().battles.some((b: { sessionId: string }) => b.sessionId === sessionId));
+});
+
+test("leaving mid-battle forfeits: the leaver sees a loss, the opponent sees a win", async () => {
+  const app = buildApp();
+  const { sessionId } = await createAndJoin(app, [bulbasaur()], [charmander()]);
+
+  const leave = await app.inject({ method: "POST", url: `/battles/${sessionId}/leave`, payload: { uuid: "uuid-a" } });
+  assert.equal(leave.statusCode, 200);
+  assert.equal(leave.json().status, "forfeited");
+
+  const leaverPoll = await app.inject({ method: "GET", url: `/battles/${sessionId}?uuid=uuid-a` });
+  assert.equal(leaverPoll.json().status, "completed");
+  assert.equal(leaverPoll.json().result, "loss");
+
+  const opponentPoll = await app.inject({ method: "GET", url: `/battles/${sessionId}?uuid=uuid-b` });
+  assert.equal(opponentPoll.json().status, "completed");
+  assert.equal(opponentPoll.json().result, "win");
+});
+
+test("choosing a move after a forfeit is rejected", async () => {
+  const app = buildApp();
+  const { sessionId } = await createAndJoin(app, [bulbasaur()], [charmander()]);
+  await app.inject({ method: "POST", url: `/battles/${sessionId}/leave`, payload: { uuid: "uuid-a" } });
+
+  const choose = await app.inject({ method: "POST", url: `/battles/${sessionId}/choose`, payload: { uuid: "uuid-b", choice: "move 1" } });
+  assert.equal(choose.statusCode, 409);
+});
+
+test("a non-participant cannot leave someone else's battle", async () => {
+  const app = buildApp();
+  const { sessionId } = await createAndJoin(app, [bulbasaur()], [charmander()]);
+  const leave = await app.inject({ method: "POST", url: `/battles/${sessionId}/leave`, payload: { uuid: "stranger" } });
+  assert.equal(leave.statusCode, 403);
+});
+
 test("on Vercel, refuses to create a battle unless Redis is configured", async () => {
   // Whether this environment has real Redis credentials (a local .env with Upstash creds, say)
   // determines which branch is actually exercised here — checked against the same flag the route

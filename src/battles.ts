@@ -42,6 +42,13 @@ interface SessionMeta {
   b?: RosterSide;
   seed?: PRNGSeed;
   createdAt: number;
+  /** Set by POST /battles/:id/leave when a side abandons a battle that's already started (the
+   * pre-join case just deletes the session outright — see that route). Deliberately not modeled
+   * as a Battle.win() call: this app never stores a live Battle, only replays one fresh per
+   * request, so any engine-side mutation would vanish the instant the request ends. A flag on
+   * meta survives every future rebuild the same way seed/log already do; battleView overrides
+   * status/result from it directly instead of asking the (unaware) engine. */
+  forfeitedBy?: "p1" | "p2";
 }
 
 const store = createSessionStore<SessionMeta>("battle:");
@@ -160,17 +167,23 @@ function battleView(meta: SessionMeta, rebuilt: RebuiltBattle | undefined, mySid
   // itself deterministically reproduced by replay, so every rebuild reaches the same conclusion.
   if (!battle.ended && battle.turn > TURN_CAP) battle.tie();
 
+  // A forfeit overrides the engine's own ended/winner state — see SessionMeta.forfeitedBy's doc for
+  // why this can't just be a battle.win() call. The roster/HP/log below still reflect the real
+  // battle state at the moment of forfeit; only status/result/pendingChoice are overridden.
+  const completed = battle.ended || meta.forfeitedBy !== undefined;
   let result: "win" | "loss" | "draw" | undefined;
-  if (battle.ended) {
+  if (meta.forfeitedBy) {
+    result = meta.forfeitedBy === mySideID ? "loss" : "win";
+  } else if (battle.ended) {
     result = !battle.winner ? "draw" : battle.winner === (mySideID === "p1" ? meta.a.displayName : meta.b.displayName)
       ? "win" : "loss";
   }
 
   const oppActive = oppSide.active[0];
   return {
-    status: battle.ended ? "completed" : "active",
+    status: completed ? "completed" : "active",
     turn: battle.turn,
-    pendingChoice: battle.ended ? "" : mySide.requestState,
+    pendingChoice: completed ? "" : mySide.requestState,
     you: {
       displayName: mySideID === "p1" ? meta.a.displayName : meta.b.displayName,
       roster: publicRoster(battle, mySideID, mySideID === "p1" ? meta.a.primitives : meta.b.primitives, originalIndex),
@@ -309,6 +322,7 @@ export function registerBattleRoutes(app: FastifyInstance): void {
     if (!isChoicePayload(req.body)) return reply.code(400).send({ error: "invalid choice" });
     const sideid = sideIdFor(meta, req.body.uuid);
     if (!sideid) return reply.code(403).send({ error: "not a participant" });
+    if (meta.forfeitedBy) return reply.code(409).send({ error: "battle already completed" });
     const rebuilt = await rebuildBattle(id, meta);
     if (!rebuilt) return reply.code(409).send({ error: "battle not started" });
     if (rebuilt.battle.ended) return reply.code(409).send({ error: "battle already completed" });
@@ -316,5 +330,31 @@ export function registerBattleRoutes(app: FastifyInstance): void {
     if (!accepted) return reply.code(400).send({ error: "choice rejected by battle engine" });
     await store.appendLog(id, packEntry(sideid, req.body.choice), IDLE_TTL_MS);
     return battleView(meta, rebuilt, sideid);
+  });
+
+  // Explicit "I'm abandoning this battle" — every client exit path (cancel before an opponent
+  // joins, a voluntary forfeit mid-battle, best-effort on app quit) routes through here rather than
+  // just letting the session sit until its TTL lapses. Before a join, there's nothing to resolve —
+  // delete outright. After, the other side deserves a real result on their next poll, not a session
+  // that silently goes quiet for up to 5 idle minutes and then 404s — see battleView's
+  // meta.forfeitedBy handling.
+  app.post("/battles/:id/leave", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const meta = await store.loadMeta(id);
+    if (!meta) return reply.code(404).send({ error: "not found" });
+    const { uuid } = (req.body ?? {}) as { uuid?: string };
+    const sideid = sideIdFor(meta, uuid ?? "");
+    if (!sideid) return reply.code(403).send({ error: "not a participant" });
+
+    if (!meta.b) {
+      await store.remove(id);
+      await store.removeFromSet(OPEN_INDEX_KEY, id);
+      return { status: "removed" };
+    }
+    if (meta.forfeitedBy || (await rebuildBattle(id, meta))?.battle.ended) {
+      return { status: "already completed" };
+    }
+    await store.saveMeta(id, { ...meta, forfeitedBy: sideid }, IDLE_TTL_MS);
+    return { status: "forfeited" };
   });
 }

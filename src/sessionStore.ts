@@ -52,6 +52,11 @@ const redisClient = redisConfigured ? Redis.fromEnv() : undefined;
 export interface SessionStore<Meta> {
   loadMeta(id: string): Promise<Meta | undefined>;
   saveMeta(id: string, meta: Meta, ttlMs: number): Promise<void>;
+  /** Hard delete, for an explicit leave/forfeit before either side ever joined — there's nothing to
+   * resolve, so there's no reason to wait out the TTL. (A leave *after* joining doesn't call this —
+   * see battles.ts's /leave: it marks the session forfeited instead, so the other side's next poll
+   * still gets a real result rather than a sudden 404.) */
+  remove(id: string): Promise<void>;
   appendLog(id: string, entry: string, ttlMs: number): Promise<void>;
   loadLog(id: string): Promise<string[]>;
   addToSet(setKey: string, member: string, ttlMs?: number): Promise<void>;
@@ -79,6 +84,11 @@ class MemoryStore<Meta> implements SessionStore<Meta> {
 
   async saveMeta(id: string, value: Meta, ttlMs: number): Promise<void> {
     this.meta.set(id, { value, expiresAt: Date.now() + ttlMs });
+  }
+
+  async remove(id: string): Promise<void> {
+    this.meta.delete(id);
+    this.log.delete(id);
   }
 
   async appendLog(id: string, entry: string, ttlMs: number): Promise<void> {
@@ -124,6 +134,10 @@ class RedisStore<Meta> implements SessionStore<Meta> {
 
   async saveMeta(id: string, value: Meta, ttlMs: number): Promise<void> {
     await this.redis.set(this.metaKey(id), value, { px: ttlMs });
+  }
+
+  async remove(id: string): Promise<void> {
+    await this.redis.del(this.metaKey(id), this.logKey(id));
   }
 
   async appendLog(id: string, entry: string, ttlMs: number): Promise<void> {
