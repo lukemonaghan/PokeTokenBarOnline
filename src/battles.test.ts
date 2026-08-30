@@ -44,6 +44,15 @@ test("create + join starts an active battle", async () => {
   assert.equal(joinBody.status, "active");
 });
 
+test("hostLeadSpeciesID is the creator's first roster slot, the same for both sides' polls", async () => {
+  const app = buildApp();
+  const { sessionId } = await createAndJoin(app, [bulbasaur()], [charmander()]);
+  const creatorPoll = await app.inject({ method: "GET", url: `/battles/${sessionId}?uuid=uuid-a` });
+  const joinerPoll = await app.inject({ method: "GET", url: `/battles/${sessionId}?uuid=uuid-b` });
+  assert.equal(creatorPoll.json().hostLeadSpeciesID, 1, "bulbasaur()'s speciesID");
+  assert.equal(joinerPoll.json().hostLeadSpeciesID, 1, "same value regardless of who's asking");
+});
+
 test("a resolved turn deals damage and increments the turn counter", async () => {
   const app = buildApp();
   const { sessionId } = await createAndJoin(app, [bulbasaur()], [charmander()]);

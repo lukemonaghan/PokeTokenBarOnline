@@ -206,6 +206,14 @@ function battleView(meta: SessionMeta, rebuilt: RebuiltBattle | undefined, mySid
         : null,
       rosterSize: oppSide.pokemon.length,
     },
+    // The session creator's (`meta.a`, "p1") first roster slot — same value for both sides' polls,
+    // regardless of who's asking, since it's read off `meta` directly rather than "you"/"opponent"
+    // (which flip per-viewer). Lets the client pick a battle background by type deterministically:
+    // both players resolve the same species → the same terrain, without needing to know who's the
+    // host (this app never tells a client whether it's p1/p2 — see sideIdFor's callers) or seeing
+    // more than a species id, the same amount of information the opponent's own active mon already
+    // reveals.
+    hostLeadSpeciesID: meta.a.primitives[0].speciesID,
     log: battle.log,
     result,
   };
