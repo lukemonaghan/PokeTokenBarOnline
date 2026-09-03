@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { FastifyInstance } from "fastify";
-import { Battle, toID } from "@pkmn/sim";
-import type { Pokemon, PRNGSeed } from "@pkmn/sim";
+import { Battle, extractChannelMessages, toID } from "@pkmn/sim";
+import type { Pokemon, PRNGSeed, Side } from "@pkmn/sim";
 import type { PokemonSet } from "@pkmn/types";
 import { type MonPrimitive, isRoster, toPokemonSet, hasSpecies, UnknownSpeciesError } from "./pkmnAdapter.js";
 import { createSessionStore, redisConfigured } from "./sessionStore.js";
@@ -153,6 +153,29 @@ function publicRoster(
     }));
 }
 
+/**
+ * The client shows/picks a switch target by *stable* roster position (`you.roster[i]`, see
+ * `publicRoster` above) — but `Battle.choose(side, "switch N")` expects `N` as a 1-indexed
+ * position in `side.pokemon`, which `@pkmn/sim` reorders on every switch (the active mon always
+ * moves to slot 0, everything before it shifts down, everything after stays put). Left
+ * untranslated, a "switch N" built from the stable index only happens to still be correct for
+ * mons that were already *after* the currently-active mon's original slot; for anything before
+ * it (very often slot 0, the original lead) it silently targets the wrong mon — usually the
+ * active mon itself, always rejected, which is exactly the client-reported "I can't switch to my
+ * slot 0 Venusaur / works fine for slot 2 Blastoise" split. Rewritten here, once, right before the
+ * choice ever reaches the engine or the log — the log's own replay (`rebuildBattle`) must see the
+ * same live-indexed string a fresh rebuild resolves identically, since `@pkmn/sim`'s reordering at
+ * any given point in a battle's history is itself deterministic.
+ */
+function toEngineChoice(choice: string, side: Side, originalIndex: WeakMap<Pokemon, number>): string {
+  const match = /^switch (\d+)$/.exec(choice);
+  if (!match) return choice;
+  const stableIndex = Number(match[1]) - 1;
+  const target = side.pokemon.find((mon) => originalIndex.get(mon) === stableIndex);
+  if (!target) return choice; // no match for that stable index — let the engine reject it on its own terms
+  return `switch ${side.pokemon.indexOf(target) + 1}`;
+}
+
 function battleView(meta: SessionMeta, rebuilt: RebuiltBattle | undefined, mySideID: "p1" | "p2"): Record<string, unknown> {
   if (!rebuilt || !meta.b) return { status: "waiting", turn: 0 };
   const { battle, originalIndex } = rebuilt;
@@ -214,7 +237,17 @@ function battleView(meta: SessionMeta, rebuilt: RebuiltBattle | undefined, mySid
     // more than a species id, the same amount of information the opponent's own active mon already
     // reveals.
     hostLeadSpeciesID: meta.a.primitives[0].speciesID,
-    log: battle.log,
+    // `battle.log` is written for a real Showdown *server* to fan out, not for a single viewer to
+    // read directly: a `|split|pN` line means the next two lines are the same event twice — once
+    // with the full detail only pN's own client should see, once with the redacted detail every
+    // other viewer gets — and the receiving client is the one expected to pick a line and drop the
+    // other. Nothing here ever did that, so both copies rode along verbatim (visible as doubled
+    // "sent out"/"took damage" lines once the client started rendering the log as readable text
+    // instead of raw protocol nobody looked at closely). `extractChannelMessages` is `@pkmn/sim`'s
+    // own implementation of that same per-viewer pick — channel `1`/`2` for `mySideID`'s own splits
+    // resolves to the secret (full-detail) line, and to the shared (redacted) line for the other
+    // side's splits, exactly matching what a real client would show this viewer.
+    log: extractChannelMessages(battle.log.join("\n"), [mySideID === "p1" ? 1 : 2])[mySideID === "p1" ? 1 : 2],
     result,
   };
 }
@@ -334,9 +367,10 @@ export function registerBattleRoutes(app: FastifyInstance): void {
     const rebuilt = await rebuildBattle(id, meta);
     if (!rebuilt) return reply.code(409).send({ error: "battle not started" });
     if (rebuilt.battle.ended) return reply.code(409).send({ error: "battle already completed" });
-    const accepted = rebuilt.battle.choose(sideid, req.body.choice);
+    const engineChoice = toEngineChoice(req.body.choice, sideid === "p1" ? rebuilt.battle.p1 : rebuilt.battle.p2, rebuilt.originalIndex);
+    const accepted = rebuilt.battle.choose(sideid, engineChoice);
     if (!accepted) return reply.code(400).send({ error: "choice rejected by battle engine" });
-    await store.appendLog(id, packEntry(sideid, req.body.choice), IDLE_TTL_MS);
+    await store.appendLog(id, packEntry(sideid, engineChoice), IDLE_TTL_MS);
     return battleView(meta, rebuilt, sideid);
   });
 

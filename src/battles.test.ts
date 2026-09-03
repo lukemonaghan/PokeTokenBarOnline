@@ -64,6 +64,25 @@ test("a resolved turn deals damage and increments the turn counter", async () =>
   assert.ok(body.opponent.active.hpFraction < 1, "opponent's active mon should have taken damage");
 });
 
+test("a resolved turn's log has no |split| markers and no doubled switch/damage lines", async () => {
+  // @pkmn/sim writes `|split|pN` followed by the same event twice — once with the full detail
+  // only pN's own client should see, once redacted for everyone else — expecting the receiving
+  // client to pick one and drop the other. `battleView` now does that picking server-side (see its
+  // `extractChannelMessages` call); left undone, a viewer's log carried the raw `|split|` marker
+  // line plus both copies of every switch/damage line verbatim.
+  const app = buildApp();
+  const { sessionId } = await createAndJoin(app, [bulbasaur()], [charmander()]);
+  const res = await app.inject({ method: "POST", url: `/battles/${sessionId}/choose`, payload: { uuid: "uuid-a", choice: "move 1" } });
+  await app.inject({ method: "POST", url: `/battles/${sessionId}/choose`, payload: { uuid: "uuid-b", choice: "move 1" } });
+  const pollA = await app.inject({ method: "GET", url: `/battles/${sessionId}?uuid=uuid-a` });
+  const log: string[] = pollA.json().log;
+  assert.ok(!log.some((line) => line.startsWith("|split|")), "split markers should be resolved away, not shown");
+  const switchLines = log.filter((line) => line.startsWith("|switch|p1a"));
+  assert.equal(switchLines.length, 1, "the initial send-out shouldn't appear twice");
+  const damageLines = log.filter((line) => line.startsWith("|-damage|p1a"));
+  assert.equal(damageLines.length, 1, "the hit this side's own mon took shouldn't appear twice");
+});
+
 test("voluntary switch changes the active mon without a faint", async () => {
   const app = buildApp();
   const { sessionId } = await createAndJoin(app, [bulbasaur(), squirtle()], [charmander()]);
@@ -75,6 +94,30 @@ test("voluntary switch changes the active mon without a faint", async () => {
   assert.equal(body.you.activeIndex, 1);
   assert.equal(body.you.roster[1].speciesID, 7);
   assert.equal(body.you.roster[0].speciesID, 1, "roster order stays stable across a switch, not reshuffled");
+});
+
+test("switching back to an earlier roster slot still resolves correctly after a prior switch", async () => {
+  // [Regression] @pkmn/sim reorders `side.pokemon` on every switch (the active mon moves to
+  // slot 0) — a client that always sends its *stable* roster index (what `you.roster[i]` shows,
+  // unaffected by that reordering) silently targets the wrong mon, or the active mon itself
+  // (always rejected), the instant the target's stable index is *before* whichever mon is
+  // currently active. Reported live as "I can't switch to my slot 0 Venusaur [after switching to
+  // Mewtwo, roster slot 1] / works fine for slot 2 Blastoise" — Blastoise's stable slot happened
+  // to still be correct only because it was already *after* Mewtwo's original slot.
+  const app = buildApp();
+  const { sessionId } = await createAndJoin(app, [bulbasaur(), squirtle(), charmander()], [charizard()]);
+  // Switch to squirtle (stable slot 2) — the only switch so far, so stable and live indexing still
+  // coincide here; this alone wouldn't have caught the bug.
+  await app.inject({ method: "POST", url: `/battles/${sessionId}/choose`, payload: { uuid: "uuid-a", choice: "switch 2" } });
+  await app.inject({ method: "POST", url: `/battles/${sessionId}/choose`, payload: { uuid: "uuid-b", choice: "move 1" } });
+  // Now switch back to bulbasaur — stable slot 1, but squirtle (the current active mon) now
+  // occupies live slot 1 after the first switch moved it to the front.
+  const res = await app.inject({ method: "POST", url: `/battles/${sessionId}/choose`, payload: { uuid: "uuid-a", choice: "switch 1" } });
+  await app.inject({ method: "POST", url: `/battles/${sessionId}/choose`, payload: { uuid: "uuid-b", choice: "move 1" } });
+  assert.equal(res.statusCode, 200, "a stable-slot-1 switch should be accepted, not rejected by the engine");
+  const body = res.json();
+  assert.equal(body.you.activeIndex, 0, "back to bulbasaur (stable slot 0), not left on squirtle or rejected");
+  assert.equal(body.you.roster[0].speciesID, 1, "bulbasaur");
 });
 
 test("a faint forces a switch: pendingChoice flips to 'switch' and the client can resolve it", async () => {
