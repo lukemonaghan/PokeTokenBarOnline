@@ -170,11 +170,31 @@ function publicRoster(
  * same live-indexed string a fresh rebuild resolves identically, since `@pkmn/sim`'s reordering at
  * any given point in a battle's history is itself deterministic.
  */
+function toEngineChoice(choice: string, side: Side, originalIndex: WeakMap<Pokemon, number>): string {
+  const match = /^switch (\d+)$/.exec(choice);
+  if (!match) return choice;
+  const stableIndex = Number(match[1]) - 1;
+  const target = side.pokemon.find((mon) => originalIndex.get(mon) === stableIndex);
+  if (!target) return choice; // no match for that stable index — let the engine reject it on its own terms
+  return `switch ${side.pokemon.indexOf(target) + 1}`;
+}
+
 interface PublicMoveSlot {
   moveSlug: string;
   pp: number;
   maxPP: number;
   disabled: boolean;
+}
+
+/** The structural shape read off `side.activeRequest` — cast rather than imported, since
+ * `@pkmn/sim`'s package root only re-exports the `Side` class, not the request interfaces (
+ * `MoveRequest`/`PokemonMoveRequestData`) living alongside it in `./side`. */
+interface ActiveMoveRequest {
+  active?: {
+    moves?: { move: string; id: string; pp?: number; maxpp?: number; disabled?: string | boolean }[];
+    trapped?: boolean;
+    maybeTrapped?: boolean;
+  }[];
 }
 
 /**
@@ -187,31 +207,48 @@ interface PublicMoveSlot {
  * ourselves, which mutates the mon's trap/lock flags as a side effect and is meant to be called
  * exactly once, internally, when the engine builds the request.
  *
- * Cast rather than importing `MoveRequest`/`PokemonMoveRequestData` — `@pkmn/sim`'s package root
- * only re-exports the `Side` class, not the request interfaces living alongside it in `./side`.
+ * Locked into a charge/recharge/repeat turn (Fly's "flew up high" beat, Hyper Beam's forced
+ * recharge, mid-Outrage) — `getMoves()`'s locked-move branch (`@pkmn/sim`'s pokemon.js) returns
+ * *only* `{move, id}` for that one slot, dropping `pp`/`maxpp` entirely (its reference client,
+ * Showdown, never renders a PP number for a locked turn — there's nothing to choose either way).
+ * Left as `?? 0`, that read as "0 PP left", indistinguishable from an exhausted move. Backfilled
+ * here from `pokemon.moveSlots` (the mon's own real, always-current PP ledger) by move id, which
+ * covers every locked-in-a-real-move case (Fly, Outrage, Bide, ...). The one case that *isn't* a
+ * real known move — Hyper Beam's synthetic `"recharge"` pseudo-move — has no PP to backfill (it's
+ * not a move the mon knows), so it still reports 0/0; the client falls back to the slug itself as
+ * display text there rather than a `moveDetail` lookup, since PokéAPI has no "recharge" move either.
  */
-function activeMoveSlots(side: Side): PublicMoveSlot[] | null {
-  if (side.requestState !== "move" || !side.activeRequest) return null;
-  const request = side.activeRequest as {
-    active?: { moves?: { move: string; pp?: number; maxpp?: number; disabled?: string | boolean }[] }[];
-  };
-  const slot = request.active?.[0];
-  if (!slot?.moves) return null;
-  return slot.moves.map((m) => ({
-    moveSlug: m.move.toLowerCase().replace(/\s+/g, "-"),
-    pp: m.pp ?? 0,
-    maxPP: m.maxpp ?? 0,
-    disabled: !!m.disabled,
-  }));
+/** The one known case (of all 458 real Gen<=5 moves, checked 2026-09-14) where the generic
+ * lowercase-and-hyphenate slug doesn't match PokéAPI: Game Freak's official spelling is "Vise
+ * Grip" (what `@pkmn/sim` says here), but PokéAPI never updated its slug from "Vice Grip". */
+const MOVE_SLUG_ALIASES: Record<string, string> = { "vise-grip": "vice-grip" };
+
+function activeMoveSlots(side: Side, active: Pokemon): PublicMoveSlot[] | null {
+  const slot = (side.activeRequest as ActiveMoveRequest | null)?.active?.[0];
+  if (side.requestState !== "move" || !slot?.moves) return null;
+  return slot.moves.map((m) => {
+    const real = active.moveSlots.find((s) => s.id === m.id);
+    const slug = m.move.toLowerCase().replace(/\s+/g, "-");
+    return {
+      moveSlug: MOVE_SLUG_ALIASES[slug] ?? slug,
+      pp: m.pp ?? real?.pp ?? 0,
+      maxPP: m.maxpp ?? real?.maxpp ?? 0,
+      disabled: !!m.disabled,
+    };
+  });
 }
 
-function toEngineChoice(choice: string, side: Side, originalIndex: WeakMap<Pokemon, number>): string {
-  const match = /^switch (\d+)$/.exec(choice);
-  if (!match) return choice;
-  const stableIndex = Number(match[1]) - 1;
-  const target = side.pokemon.find((mon) => originalIndex.get(mon) === stableIndex);
-  if (!target) return choice; // no match for that stable index — let the engine reject it on its own terms
-  return `switch ${side.pokemon.indexOf(target) + 1}`;
+/**
+ * Gen 5 move audit, "partial trap" category (Wrap/Bind/Fire Spin/Clamp/Whirlpool/Sand Tomb/Magma
+ * Storm): these don't restrict which move you pick, they restrict whether you can switch out at
+ * all — a legality fact `activeMoveSlots` above never carried (it only forwards `.moves`). Same
+ * source, same request object, just the sibling `trapped`/`maybeTrapped` fields
+ * `getMoveRequestData` sets alongside `moves` (`@pkmn/sim`'s pokemon.js: set once, canSwitchIn
+ * already factored in — never recomputed here).
+ */
+function isTrapped(side: Side): boolean {
+  const slot = (side.activeRequest as ActiveMoveRequest | null)?.active?.[0];
+  return side.requestState === "move" && !!(slot?.trapped || slot?.maybeTrapped);
 }
 
 function battleView(meta: SessionMeta, rebuilt: RebuiltBattle | undefined, mySideID: "p1" | "p2"): Record<string, unknown> {
@@ -250,7 +287,12 @@ function battleView(meta: SessionMeta, rebuilt: RebuiltBattle | undefined, mySid
       activeIndex: originalIndex.get(mySide.active[0])!,
       // Gen 5 move audit, Fix B — see `activeMoveSlots`. `null` while it isn't this side's move
       // choice (switch/team-preview/wait), same as `pendingChoice` distinguishing those states.
-      activeMoves: activeMoveSlots(mySide),
+      activeMoves: activeMoveSlots(mySide, mySide.active[0]),
+      // Gen 5 move audit, "partial trap" category — see `isTrapped`. False (not just absent) while
+      // it isn't this side's move choice, matching `activeMoves`' null in that same window — the
+      // client can safely treat "can't switch" as the resting default rather than needing a third
+      // "don't know yet" state.
+      trapped: isTrapped(mySide),
     },
     opponent: {
       displayName: oppRosterSide.displayName,

@@ -77,6 +77,86 @@ test("you.activeMoves exposes live move slots with slugs matching the submitted 
   );
   assert.equal(view.you.activeMoves[0].pp, view.you.activeMoves[0].maxPP, "unused move starts at full PP");
   assert.equal(view.you.activeMoves[0].disabled, false);
+  assert.equal(view.you.trapped, false, "not trapped before anything happens");
+});
+
+// Gen 5 move audit, "partial trap" category (Wrap/Bind/Fire Spin/...) — restricts switching, not
+// move choice, so it isn't covered by activeMoves at all; needs its own flag off the same request.
+// Needs a benched mon on the trapped side — @pkmn/sim only ever reports `trapped` when there's
+// somewhere to switch to (`canSwitchIn`); with a lone mon, switching is already moot either way.
+// Every partial-trap move has <100% accuracy (Wrap is 90) with no seedable PRNG exposed at this
+// API boundary, so retries a few times rather than asserting on a single roll — missing 5 times
+// running is 0.1^5 (1-in-100,000), a flake rate no realistic CI budget needs to tolerate.
+test("you.trapped flips true once Wrap lands, for the trapped side only", async () => {
+  const app = buildApp();
+  const { sessionId } = await createAndJoin(app, [bulbasaur(["wrap"])], [charmander(["scratch"]), squirtle()]);
+
+  let trapped = false;
+  for (let attempt = 0; attempt < 5 && !trapped; attempt++) {
+    await app.inject({ method: "POST", url: `/battles/${sessionId}/choose`, payload: { uuid: "uuid-a", choice: "move 1" } });
+    await app.inject({ method: "POST", url: `/battles/${sessionId}/choose`, payload: { uuid: "uuid-b", choice: "move 1" } });
+    const poll = await app.inject({ method: "GET", url: `/battles/${sessionId}?uuid=uuid-b` });
+    trapped = poll.json().you.trapped;
+  }
+  assert.equal(trapped, true, "charmander was just Wrapped by bulbasaur");
+
+  const wrapperSide = await app.inject({ method: "GET", url: `/battles/${sessionId}?uuid=uuid-a` });
+  assert.equal(wrapperSide.json().you.trapped, false, "bulbasaur itself is free to switch");
+});
+
+// Gen 5 move audit / data validation — the one move (of all 458 real Gen<=5 moves) whose generic
+// lowercase-and-hyphenate slug doesn't match PokéAPI: `@pkmn/sim` says "Vise Grip" (current official
+// spelling), PokéAPI's slug is still "vice-grip" (old spelling, never updated).
+test("you.activeMoves aliases Vise Grip's slug to PokéAPI's old spelling", async () => {
+  const app = buildApp();
+  const { sessionId } = await createAndJoin(app, [bulbasaur(["visegrip"])], [charmander()]);
+  const poll = await app.inject({ method: "GET", url: `/battles/${sessionId}?uuid=uuid-a` });
+  assert.equal(poll.json().you.activeMoves[0].moveSlug, "vice-grip");
+});
+
+// Gen 5 move audit, "charge turn" category (Fly/Dig/Dive/...) — `@pkmn/sim`'s locked-move branch
+// of getMoves() returns only `{move, id}` for the one legal slot, omitting pp/maxpp entirely (its
+// reference client never shows a PP number for a locked turn). Left as `?? 0`, that read as "0 PP
+// left" — indistinguishable from an exhausted move. Must backfill from the mon's real moveSlots.
+test("you.activeMoves shows Fly's real remaining PP during its charge turn, not 0/0", async () => {
+  const app = buildApp();
+  const { sessionId } = await createAndJoin(app, [bulbasaur(["fly", "tackle"])], [charmander()]);
+  await app.inject({ method: "POST", url: `/battles/${sessionId}/choose`, payload: { uuid: "uuid-a", choice: "move 1" } });
+  const res = await app.inject({ method: "POST", url: `/battles/${sessionId}/choose`, payload: { uuid: "uuid-b", choice: "move 1" } });
+  assert.equal(res.json().turn, 2, "the charge turn consumes a real turn even though nothing else can happen");
+
+  const poll = await app.inject({ method: "GET", url: `/battles/${sessionId}?uuid=uuid-a` });
+  const active = poll.json().you.activeMoves;
+  assert.equal(active.length, 1, "no real choice on the charge turn — only Fly itself is offered");
+  assert.equal(active[0].moveSlug, "fly");
+  assert.ok(active[0].maxPP > 0, "must have a real max PP, not the locked-branch's missing field defaulting to 0");
+  assert.equal(active[0].pp, active[0].maxPP - 1, "one PP already spent starting the charge");
+});
+
+// Gen 5 move audit, "recharge turn" category (Hyper Beam/Giga Impact/...) — unlike charge-turn
+// moves, the forced action here (`"recharge"`) isn't a move the mon actually knows, so there's
+// nothing in its moveSlots to backfill PP from — 0/0 here is the honest, correct value.
+// Gen 5 only imposes the recharge lock once Hyper Beam actually connects (unlike Gen 1-4, which
+// recharge on a miss too) — and it's 90% accurate, same flake shape as Wrap above, so this also
+// retries: Snorlax's only move is Hyper Beam, so a miss just means "try again next turn" for free.
+test("you.activeMoves reports the synthetic 'recharge' slot after Hyper Beam connects, not a real move", async () => {
+  const app = buildApp();
+  // Snorlax (bulky) at 50 vs. a level-100 Rattata: tanky enough on both sides that neither one-shots
+  // the other before Hyper Beam's recharge turn is reached — a level-50 Bulbasaur here dies first to
+  // the level-100 Rattata's Tackle before its own Hyper Beam ever resolves.
+  const snorlax = { speciesID: 143, level: 50, nature: "hardy", ability: "thickfat", ivs: Z, evs: Z, moves: ["hyperbeam"] };
+  const tankyRattata = { speciesID: 19, level: 100, nature: "hardy", ability: "runaway", ivs: Z, evs: Z, moves: ["tackle"] };
+  const { sessionId } = await createAndJoin(app, [snorlax], [tankyRattata]);
+
+  let active: unknown[] = [];
+  for (let attempt = 0; attempt < 5 && active.length === 0; attempt++) {
+    await app.inject({ method: "POST", url: `/battles/${sessionId}/choose`, payload: { uuid: "uuid-a", choice: "move 1" } });
+    await app.inject({ method: "POST", url: `/battles/${sessionId}/choose`, payload: { uuid: "uuid-b", choice: "move 1" } });
+    const poll = await app.inject({ method: "GET", url: `/battles/${sessionId}?uuid=uuid-a` });
+    const polled = poll.json().you.activeMoves;
+    if (polled?.[0]?.moveSlug === "recharge") active = polled;
+  }
+  assert.deepEqual(active, [{ moveSlug: "recharge", pp: 0, maxPP: 0, disabled: false }]);
 });
 
 test("you.activeMoves marks a Disabled slot, and drops PP as it's used — not derivable from the submitted roster alone", async () => {
