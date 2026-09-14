@@ -64,6 +64,39 @@ test("a resolved turn deals damage and increments the turn counter", async () =>
   assert.ok(body.opponent.active.hpFraction < 1, "opponent's active mon should have taken damage");
 });
 
+// Gen 5 move audit, Fix B — `you.activeMoves` must reflect @pkmn/sim's live per-slot request data
+// (id/PP/disabled), not just echo whatever the client originally submitted.
+test("you.activeMoves exposes live move slots with slugs matching the submitted primitives", async () => {
+  const app = buildApp();
+  const { sessionId } = await createAndJoin(app, [bulbasaur(["tackle", "growl"])], [charmander()]);
+  const poll = await app.inject({ method: "GET", url: `/battles/${sessionId}?uuid=uuid-a` });
+  const view = poll.json();
+  assert.deepEqual(
+    view.you.activeMoves.map((m: { moveSlug: string }) => m.moveSlug),
+    ["tackle", "growl"],
+  );
+  assert.equal(view.you.activeMoves[0].pp, view.you.activeMoves[0].maxPP, "unused move starts at full PP");
+  assert.equal(view.you.activeMoves[0].disabled, false);
+});
+
+test("you.activeMoves marks a Disabled slot, and drops PP as it's used — not derivable from the submitted roster alone", async () => {
+  const app = buildApp();
+  const { sessionId } = await createAndJoin(app, [bulbasaur(["tackle", "growl"])], [squirtle(["disable", "tackle"])]);
+  // Turn 1: both attack, so squirtle's Disable (turn 2) has a real "target's most-recently-used move" to lock.
+  await app.inject({ method: "POST", url: `/battles/${sessionId}/choose`, payload: { uuid: "uuid-a", choice: "move 1" } });
+  await app.inject({ method: "POST", url: `/battles/${sessionId}/choose`, payload: { uuid: "uuid-b", choice: "move 2" } });
+  // Turn 2: squirtle disables bulbasaur's tackle.
+  await app.inject({ method: "POST", url: `/battles/${sessionId}/choose`, payload: { uuid: "uuid-a", choice: "move 1" } });
+  const res = await app.inject({ method: "POST", url: `/battles/${sessionId}/choose`, payload: { uuid: "uuid-b", choice: "move 1" } });
+  const bView = res.json();
+  assert.equal(bView.turn, 3);
+  const aPoll = await app.inject({ method: "GET", url: `/battles/${sessionId}?uuid=uuid-a` });
+  const aView = aPoll.json();
+  const tackle = aView.you.activeMoves.find((m: { moveSlug: string }) => m.moveSlug === "tackle");
+  assert.equal(tackle.disabled, true, "tackle was just Disabled by squirtle");
+  assert.ok(tackle.pp < tackle.maxPP, "tackle was used twice, PP should reflect that");
+});
+
 test("a resolved turn's log has no |split| markers and no doubled switch/damage lines", async () => {
   // @pkmn/sim writes `|split|pN` followed by the same event twice — once with the full detail
   // only pN's own client should see, once redacted for everyone else — expecting the receiving

@@ -138,15 +138,18 @@ interface PublicMon {
 function publicRoster(
   battle: Battle,
   sideid: "p1" | "p2",
-  primitives: MonPrimitive[],
   originalIndex: WeakMap<Pokemon, number>,
 ): PublicMon[] {
   const side = sideid === "p1" ? battle.p1 : battle.p2;
   return side.pokemon
     .map((mon) => ({ mon, i: originalIndex.get(mon)! }))
     .sort((a, b) => a.i - b.i)
-    .map(({ mon, i }) => ({
-      speciesID: primitives[i].speciesID,
+    .map(({ mon }) => ({
+      // Gen 5 move audit, Fix A: a Transformed/Illusion-disguised mon's *displayed* species
+      // diverges from the one it was sent out as — read the live, post-transform identity
+      // (`illusion` first, since an active Illusion still reports its own `.species` underneath)
+      // rather than the static pre-battle `primitives[]` this roster used to index into.
+      speciesID: (mon.illusion ?? mon).species.num,
       name: mon.name,
       fainted: mon.fainted,
       hpFraction: mon.maxhp > 0 ? mon.hp / mon.maxhp : 0,
@@ -167,6 +170,41 @@ function publicRoster(
  * same live-indexed string a fresh rebuild resolves identically, since `@pkmn/sim`'s reordering at
  * any given point in a battle's history is itself deterministic.
  */
+interface PublicMoveSlot {
+  moveSlug: string;
+  pp: number;
+  maxPP: number;
+  disabled: boolean;
+}
+
+/**
+ * Gen 5 move audit, Fix B: `MonState.knownMoves` on the client reflects what this side
+ * *submitted* at battle start — never updated after Disable/Taunt/Encore/Torment/Imprison lock a
+ * slot, Mimic/Sketch overwrite one, or a charge/recharge/locked-in move restricts the turn.
+ * `@pkmn/sim` already computes the true post-restriction slots (id/PP/disabled) once per turn as
+ * the move request it hands the side — read that back here (`side.activeRequest`, populated
+ * whenever `requestState === "move"`) rather than calling `Pokemon.getMoveRequestData()`
+ * ourselves, which mutates the mon's trap/lock flags as a side effect and is meant to be called
+ * exactly once, internally, when the engine builds the request.
+ *
+ * Cast rather than importing `MoveRequest`/`PokemonMoveRequestData` — `@pkmn/sim`'s package root
+ * only re-exports the `Side` class, not the request interfaces living alongside it in `./side`.
+ */
+function activeMoveSlots(side: Side): PublicMoveSlot[] | null {
+  if (side.requestState !== "move" || !side.activeRequest) return null;
+  const request = side.activeRequest as {
+    active?: { moves?: { move: string; pp?: number; maxpp?: number; disabled?: string | boolean }[] }[];
+  };
+  const slot = request.active?.[0];
+  if (!slot?.moves) return null;
+  return slot.moves.map((m) => ({
+    moveSlug: m.move.toLowerCase().replace(/\s+/g, "-"),
+    pp: m.pp ?? 0,
+    maxPP: m.maxpp ?? 0,
+    disabled: !!m.disabled,
+  }));
+}
+
 function toEngineChoice(choice: string, side: Side, originalIndex: WeakMap<Pokemon, number>): string {
   const match = /^switch (\d+)$/.exec(choice);
   if (!match) return choice;
@@ -179,7 +217,6 @@ function toEngineChoice(choice: string, side: Side, originalIndex: WeakMap<Pokem
 function battleView(meta: SessionMeta, rebuilt: RebuiltBattle | undefined, mySideID: "p1" | "p2"): Record<string, unknown> {
   if (!rebuilt || !meta.b) return { status: "waiting", turn: 0 };
   const { battle, originalIndex } = rebuilt;
-  const oppSideID = mySideID === "p1" ? "p2" : "p1";
   const oppRosterSide = mySideID === "p1" ? meta.b : meta.a;
   const mySide = mySideID === "p1" ? battle.p1 : battle.p2;
   const oppSide = mySideID === "p1" ? battle.p2 : battle.p1;
@@ -209,8 +246,11 @@ function battleView(meta: SessionMeta, rebuilt: RebuiltBattle | undefined, mySid
     pendingChoice: completed ? "" : mySide.requestState,
     you: {
       displayName: mySideID === "p1" ? meta.a.displayName : meta.b.displayName,
-      roster: publicRoster(battle, mySideID, mySideID === "p1" ? meta.a.primitives : meta.b.primitives, originalIndex),
+      roster: publicRoster(battle, mySideID, originalIndex),
       activeIndex: originalIndex.get(mySide.active[0])!,
+      // Gen 5 move audit, Fix B — see `activeMoveSlots`. `null` while it isn't this side's move
+      // choice (switch/team-preview/wait), same as `pendingChoice` distinguishing those states.
+      activeMoves: activeMoveSlots(mySide),
     },
     opponent: {
       displayName: oppRosterSide.displayName,
@@ -219,9 +259,10 @@ function battleView(meta: SessionMeta, rebuilt: RebuiltBattle | undefined, mySid
       // roster mid-battle is still more information than a casual 1:1 battle should hand over.
       active: oppActive
         ? {
-            speciesID: (oppSideID === "p1" ? meta.a.primitives : meta.b!.primitives)[
-              originalIndex.get(oppActive)!
-            ].speciesID,
+            // Gen 5 move audit, Fix A — a Transformed/Illusion-disguised mon's displayed species
+            // diverges from the one it was sent out as; read the live identity, not the static
+            // pre-battle primitive this used to index into.
+            speciesID: (oppActive.illusion ?? oppActive).species.num,
             name: oppActive.name,
             fainted: oppActive.fainted,
             hpFraction: oppActive.maxhp > 0 ? oppActive.hp / oppActive.maxhp : 0,
