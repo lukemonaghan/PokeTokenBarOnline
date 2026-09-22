@@ -44,6 +44,38 @@ test("completes only once both sides confirm, and stays completed on a later pol
   assert.equal(laterPoll.json().status, "completed", "completed is stable across later polls");
 });
 
+test("a side can unconfirm and back out before the other side confirms", async () => {
+  const app = buildApp();
+  const sessionId = await create(app, "uuid-a", "Ash", bulbasaurBlob);
+  await app.inject({ method: "POST", url: `/trades/${sessionId}/join`, payload: { uuid: "uuid-b", displayName: "Gary", pokemon: charmanderBlob, tokens: 0 } });
+  await app.inject({ method: "POST", url: `/trades/${sessionId}/confirm`, payload: { uuid: "uuid-a" } });
+
+  const unconfirm = await app.inject({ method: "POST", url: `/trades/${sessionId}/unconfirm`, payload: { uuid: "uuid-a" } });
+  assert.equal(unconfirm.json().status, "offered", "backing out drops it back to offered, not completed");
+
+  // Confirming again after backing out still works — unconfirm isn't a one-way door.
+  const reconfirm = await app.inject({ method: "POST", url: `/trades/${sessionId}/confirm`, payload: { uuid: "uuid-a" } });
+  assert.equal(reconfirm.json().status, "offered");
+});
+
+test("unconfirm refuses once the trade has actually completed", async () => {
+  const app = buildApp();
+  const sessionId = await create(app, "uuid-a", "Ash", bulbasaurBlob);
+  await app.inject({ method: "POST", url: `/trades/${sessionId}/join`, payload: { uuid: "uuid-b", displayName: "Gary", pokemon: charmanderBlob, tokens: 0 } });
+  await app.inject({ method: "POST", url: `/trades/${sessionId}/confirm`, payload: { uuid: "uuid-a" } });
+  await app.inject({ method: "POST", url: `/trades/${sessionId}/confirm`, payload: { uuid: "uuid-b" } });
+
+  const unconfirm = await app.inject({ method: "POST", url: `/trades/${sessionId}/unconfirm`, payload: { uuid: "uuid-a" } });
+  assert.equal(unconfirm.statusCode, 409, "too late to back out — the trade already went through");
+});
+
+test("a non-participant can't unconfirm", async () => {
+  const app = buildApp();
+  const sessionId = await create(app, "uuid-a", "Ash", bulbasaurBlob);
+  const unconfirm = await app.inject({ method: "POST", url: `/trades/${sessionId}/unconfirm`, payload: { uuid: "stranger" } });
+  assert.equal(unconfirm.statusCode, 403);
+});
+
 test("both sides confirming at once still both land (no lost update)", async () => {
   const app = buildApp();
   const sessionId = await create(app, "uuid-a", "Ash", bulbasaurBlob);

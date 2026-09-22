@@ -140,4 +140,21 @@ export function registerTradeRoutes(app: FastifyInstance): void {
     await store.addToSet(confirmedKey(id), uuid, remainingTtl(meta.createdAt));
     return { status: await status(id, meta) };
   });
+
+  // Lets a side that already confirmed take it back, as long as the trade hasn't actually
+  // completed yet (both sides confirmed) — the client's only way to genuinely "back out" after
+  // tapping Confirm, not just stop looking at the screen. Once status is "completed" this always
+  // 409s: that's the trade actually going through, not a race to fix client-side.
+  app.post("/trades/:id/unconfirm", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const { uuid } = (req.body ?? {}) as { uuid?: string };
+    const meta = await getSession(id);
+    if (!meta) return reply.code(404).send({ error: "not found" });
+    if (!uuid || (uuid !== meta.a.uuid && uuid !== meta.b?.uuid)) {
+      return reply.code(403).send({ error: "not a participant" });
+    }
+    if ((await status(id, meta)) === "completed") return reply.code(409).send({ error: "already completed" });
+    await store.removeFromSet(confirmedKey(id), uuid);
+    return { status: await status(id, meta) };
+  });
 }
