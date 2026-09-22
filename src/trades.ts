@@ -5,7 +5,11 @@ import { createSessionStore } from "./sessionStore.js";
 export interface Offer {
   uuid: string;
   displayName: string;
-  pokemon: Record<string, unknown>;
+  /** 0-6 entries, opaque to the server (see isOffer) — see trading-overhaul.md's wire format change. */
+  pokemon: Record<string, unknown>[];
+  /** Not opaque, unlike pokemon — validated below. Moves TradeStore's spentTokens ledger on
+   * completion; the server never interprets it otherwise. */
+  tokens: number;
 }
 
 interface TradeMeta {
@@ -38,11 +42,17 @@ function remainingTtl(createdAt: number): number {
 function isOffer(body: unknown): body is Offer {
   if (typeof body !== "object" || body === null) return false;
   const b = body as Record<string, unknown>;
-  return (
-    typeof b.uuid === "string" && b.uuid.length > 0 &&
-    typeof b.displayName === "string" && b.displayName.length > 0 && b.displayName.length <= 60 &&
-    typeof b.pokemon === "object" && b.pokemon !== null && !Array.isArray(b.pokemon)
-  );
+  if (
+    typeof b.uuid !== "string" || b.uuid.length === 0 ||
+    typeof b.displayName !== "string" || b.displayName.length === 0 || b.displayName.length > 60 ||
+    !Array.isArray(b.pokemon) || b.pokemon.length > 6 ||
+    !b.pokemon.every((p) => typeof p === "object" && p !== null && !Array.isArray(p)) ||
+    typeof b.tokens !== "number" || !Number.isInteger(b.tokens) || b.tokens < 0
+  ) {
+    return false;
+  }
+  // Nothing offered isn't a trade — mirrors displayName's "reject client-side too" rule.
+  return b.pokemon.length > 0 || b.tokens > 0;
 }
 
 /** `store.loadMeta` already returns `undefined` once the TTL this session was last saved with has
@@ -72,14 +82,14 @@ export function registerTradeRoutes(app: FastifyInstance): void {
   // already expired without ever being joined, same spirit as `getSession`'s lazy expiry.
   app.get("/trades/open", async () => {
     const ids = await store.setMembers(OPEN_INDEX_KEY);
-    const entries: { sessionId: string; displayName: string; pokemon: Record<string, unknown>; createdAt: number }[] = [];
+    const entries: { sessionId: string; displayName: string; pokemon: Record<string, unknown>[]; tokens: number; createdAt: number }[] = [];
     for (const id of ids) {
       const meta = await store.loadMeta(id);
       if (!meta || meta.b) {
         await store.removeFromSet(OPEN_INDEX_KEY, id);
         continue;
       }
-      entries.push({ sessionId: id, displayName: meta.a.displayName, pokemon: meta.a.pokemon, createdAt: meta.createdAt });
+      entries.push({ sessionId: id, displayName: meta.a.displayName, pokemon: meta.a.pokemon, tokens: meta.a.tokens, createdAt: meta.createdAt });
     }
     entries.sort((a, b) => b.createdAt - a.createdAt);
     return { trades: entries.slice(0, MAX_OPEN_LISTED) };
@@ -110,8 +120,8 @@ export function registerTradeRoutes(app: FastifyInstance): void {
     }
     const counterpart = meta.b
       ? uuid === meta.a.uuid
-        ? { displayName: meta.b.displayName, pokemon: meta.b.pokemon }
-        : { displayName: meta.a.displayName, pokemon: meta.a.pokemon }
+        ? { displayName: meta.b.displayName, pokemon: meta.b.pokemon, tokens: meta.b.tokens }
+        : { displayName: meta.a.displayName, pokemon: meta.a.pokemon, tokens: meta.a.tokens }
       : null;
     return { status: await status(id, meta), counterpart };
   });

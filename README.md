@@ -23,20 +23,22 @@ server only pairs two clients and relays whatever they hand it. It's a
 ledger. Everything it knows about a trade lives in memory for as long as
 the trade takes, then it forgets.
 
-1. **Create.** Client A picks a Pokémon it owns to offer and
-   `POST /trades` with it, plus a locally-generated UUID and display name
-   (not an account, just enough to tell two participants apart). The server
-   opens an in-memory session and hands back a session id.
-2. **Share.** That becomes `https://<server>/t/<sessionId>`, a landing
-   page with a button that opens the app via
-   `poketokenbar://trade?server=<server>&session=<sessionId>`. Share it any
-   way you'd share a link; the app can also join from the session id/link
-   pasted in directly if the OS can't route the deep link (e.g. no locally
-   registered handler).
-3. **Join.** Client B opens the link (or pastes it in) and offers one of
-   its own Pokémon back via `POST /trades/:id/join`.
+1. **Create.** Client A picks 0-6 Pokémon it owns and/or a token stake to
+   offer and `POST /trades` with it, plus a locally-generated UUID and
+   display name (not an account, just enough to tell two participants
+   apart). The server opens an in-memory session and hands back a session id.
+2. **Share, or let it be found.** The session id becomes
+   `https://<server>/t/<sessionId>`, a landing page with a button that opens
+   the app via `poketokenbar://trade?server=<server>&session=<sessionId>`.
+   Share it any way you'd share a link — or skip sharing entirely: the same
+   session shows up in `GET /trades/open`, which the app's own "Browse open
+   trades" screen lists for anyone to find and join without a link at all.
+   The app can also join from a session id/link pasted in directly if the OS
+   can't route the deep link (e.g. no locally registered handler).
+3. **Join.** Client B opens the link (or finds the session by browsing) and
+   offers its own Pokémon/tokens back via `POST /trades/:id/join`.
 4. **Preview.** Once both sides have offered, `GET /trades/:id?uuid=<mine>`
-   reveals the counterpart's Pokémon to both, so each side sees what it's
+   reveals the counterpart's offer to both, so each side sees what it's
    getting before committing.
 5. **Confirm.** Each client `POST`s `/trades/:id/confirm`. Once *both* have
    confirmed, status flips to `"completed"` and stays that way on every
@@ -50,16 +52,18 @@ the trade takes, then it forgets.
 **Trust model.** Whoever holds the right `uuid` for a session can act as
 that side of it; that's the entire authentication story, deliberately, to
 avoid needing accounts for something this low-stakes. The server never
-interprets the Pokémon payload (opaque JSON in, opaque JSON out), so the
-client's save format can change without a server release.
+interprets a Pokémon's payload (opaque JSON in, opaque JSON out) — the token
+stake is the one field it does validate (non-negative integer) since it's
+not opaque. Client save format can still change without a server release.
 
 ## API
 
 | Method | Path                 | Purpose                                              |
 |--------|----------------------|-------------------------------------------------------|
 | GET    | `/health`            | Liveness check (what Settings → Online pings).        |
-| POST   | `/trades`            | Create a session, offering a Pokémon. Returns `sessionId`. |
-| POST   | `/trades/:id/join`   | Join an open session, offering a Pokémon back.        |
+| POST   | `/trades`            | Create a session, offering 0-6 Pokémon and/or tokens. Returns `sessionId`. |
+| GET    | `/trades/open`       | List sessions still waiting for a second player — what "Browse open trades" reads. |
+| POST   | `/trades/:id/join`   | Join an open session, offering Pokémon/tokens back.   |
 | GET    | `/trades/:id?uuid=`  | Poll status (`open`/`offered`/`completed`) + the counterpart's offer once both sides are in. |
 | POST   | `/trades/:id/confirm`| Confirm your side. Requires `uuid` in the body.       |
 | GET    | `/t/:id`             | Human-facing landing page for a shared invite link.   |
