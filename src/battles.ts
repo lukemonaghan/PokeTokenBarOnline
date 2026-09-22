@@ -61,6 +61,15 @@ const store = createSessionStore<SessionMeta>("battle:");
 const OPEN_INDEX_KEY = "open";
 const MAX_OPEN_LISTED = 50;
 
+/** Sessions with both sides in and not yet finished — browsable via `GET /battles/live` for
+ * spectating, same "browse instead of needing a link" shape `OPEN_INDEX_KEY` already gives joining.
+ * Added the instant a join lands (same request that removes the id from `OPEN_INDEX_KEY`), removed
+ * on an explicit mid-battle forfeit — but that's a belt-and-suspenders optimization, not the real
+ * correctness mechanism: a battle that simply finishes has no request of its own to hook, so
+ * `GET /battles/live`'s own handler is the thing that actually has to lazily drop a since-completed
+ * id on read, the same lazy-expiry spirit `OPEN_INDEX_KEY`'s own comment already describes. */
+const LIVE_INDEX_KEY = "live";
+
 function packEntry(side: "p1" | "p2", choice: string): string {
   return `${side}:${choice}`;
 }
@@ -335,6 +344,52 @@ function battleView(meta: SessionMeta, rebuilt: RebuiltBattle | undefined, mySid
   };
 }
 
+/** A spectator is neither `mySideID` — there's no "you" to build the full-detail half of
+ * `battleView` for, so this is its own view rather than a third branch stitched into that
+ * function. Both sides get exactly the restricted shape `battleView` already gives a
+ * participant's *opponent* (species/name/fainted/HP-fraction on the active mon, bench size only)
+ * — spectator.md's whole point is that no new privilege level exists, just "opponent view,
+ * rendered for both sides at once." */
+function spectatorActive(side: Side): PublicMon | null {
+  const active = side.active[0];
+  if (!active) return null;
+  return {
+    speciesID: (active.illusion ?? active).species.num,
+    name: active.name,
+    fainted: active.fainted,
+    hpFraction: active.maxhp > 0 ? active.hp / active.maxhp : 0,
+  };
+}
+
+function spectatorView(meta: SessionMeta, rebuilt: RebuiltBattle | undefined): Record<string, unknown> {
+  if (!rebuilt || !meta.b) return { status: "waiting", turn: 0 };
+  const { battle } = rebuilt;
+
+  if (!battle.ended && battle.turn > TURN_CAP) battle.tie();
+  const completed = battle.ended || meta.forfeitedBy !== undefined;
+  let winner: "p1" | "p2" | "draw" | undefined;
+  if (meta.forfeitedBy) {
+    winner = meta.forfeitedBy === "p1" ? "p2" : "p1";
+  } else if (battle.ended) {
+    winner = !battle.winner ? "draw" : battle.winner === meta.a.displayName ? "p1" : "p2";
+  }
+
+  return {
+    status: completed ? "completed" : "active",
+    turn: battle.turn,
+    p1: { displayName: meta.a.displayName, active: spectatorActive(battle.p1), rosterSize: battle.p1.pokemon.length },
+    p2: { displayName: meta.b.displayName, active: spectatorActive(battle.p2), rosterSize: battle.p2.pokemon.length },
+    hostLeadSpeciesID: meta.a.primitives[0].speciesID,
+    // Channel 0 is `@pkmn/sim`'s own "neutral spectator" convention (see `extractChannelMessages`
+    // in the sim source: a `|split|pN` line's secret half only ever goes to channel `-1` or `pN`
+    // itself — channel `0` always resolves to the shared/redacted half for every split, for both
+    // sides), not something this file invents — same primitive `battleView` already uses per-side,
+    // just the channel neither participant's view uses.
+    log: extractChannelMessages(battle.log.join("\n"), [0])[0],
+    winner,
+  };
+}
+
 export function registerBattleRoutes(app: FastifyInstance): void {
   app.post("/battles", async (req, reply) => {
     // A battle session lives for dozens of polls/choices over several minutes — far more chances
@@ -375,6 +430,31 @@ export function registerBattleRoutes(app: FastifyInstance): void {
         continue;
       }
       entries.push({ sessionId: id, displayName: meta.a.displayName, rosterSize: meta.a.primitives.length, createdAt: meta.createdAt });
+    }
+    entries.sort((a, b) => b.createdAt - a.createdAt);
+    return { battles: entries.slice(0, MAX_OPEN_LISTED) };
+  });
+
+  // Lists in-progress battles for spectating — the browse-first alternative to needing a spectate
+  // link, same "browse instead of a link" role `GET /battles/open` already plays for joining.
+  // Rebuilding each one just to check `ended` is the same "cheap enough to do on every request"
+  // trade-off `rebuildBattle` already documents (bounded by TURN_CAP) — there's no cheaper signal
+  // available, since a battle finishing has no request of its own to proactively prune this index.
+  app.get("/battles/live", async () => {
+    const ids = await store.setMembers(LIVE_INDEX_KEY);
+    const entries: { sessionId: string; p1DisplayName: string; p2DisplayName: string; turn: number; createdAt: number }[] = [];
+    for (const id of ids) {
+      const meta = await store.loadMeta(id);
+      if (!meta || !meta.b) {
+        await store.removeFromSet(LIVE_INDEX_KEY, id);
+        continue;
+      }
+      const rebuilt = await rebuildBattle(id, meta);
+      if (!rebuilt || rebuilt.battle.ended || meta.forfeitedBy !== undefined) {
+        await store.removeFromSet(LIVE_INDEX_KEY, id);
+        continue;
+      }
+      entries.push({ sessionId: id, p1DisplayName: meta.a.displayName, p2DisplayName: meta.b.displayName, turn: rebuilt.battle.turn, createdAt: meta.createdAt });
     }
     entries.sort((a, b) => b.createdAt - a.createdAt);
     return { battles: entries.slice(0, MAX_OPEN_LISTED) };
@@ -425,6 +505,7 @@ export function registerBattleRoutes(app: FastifyInstance): void {
     await store.saveMeta(id, { a: meta.a, b: bSide, seed: battle.prngSeed, createdAt: meta.createdAt }, IDLE_TTL_MS);
     for (const entry of teamPreviewEntries) await store.appendLog(id, entry, IDLE_TTL_MS);
     await store.removeFromSet(OPEN_INDEX_KEY, id);
+    await store.addToSet(LIVE_INDEX_KEY, id);
     return { status: "active" };
   });
 
@@ -437,6 +518,19 @@ export function registerBattleRoutes(app: FastifyInstance): void {
     const mySideID = sideIdFor(meta, uuid);
     if (!mySideID) return reply.code(403).send({ error: "not a participant" });
     return battleView(meta, await rebuildBattle(id, meta), mySideID);
+  });
+
+  // Read-only, no `uuid` — spectator.md's whole design point: the link is the only "auth" a
+  // participant needs either, this just skips even that. 409 pre-join (nothing to watch yet, same
+  // as a participant's own poll would find) rather than the "waiting" shape `spectatorView` itself
+  // falls back to, since that shape exists for `rebuildBattle`'s own internal undefined case, not
+  // as a documented pre-join response.
+  app.get("/battles/:id/spectate", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const meta = await store.loadMeta(id);
+    if (!meta) return reply.code(404).send({ error: "not found" });
+    if (!meta.b) return reply.code(409).send({ error: "battle not started" });
+    return spectatorView(meta, await rebuildBattle(id, meta));
   });
 
   app.post("/battles/:id/choose", async (req, reply) => {
@@ -480,6 +574,7 @@ export function registerBattleRoutes(app: FastifyInstance): void {
       return { status: "already completed" };
     }
     await store.saveMeta(id, { ...meta, forfeitedBy: sideid }, IDLE_TTL_MS);
+    await store.removeFromSet(LIVE_INDEX_KEY, id);
     return { status: "forfeited" };
   });
 }

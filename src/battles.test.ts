@@ -263,6 +263,81 @@ test("a whole roster fainting ends the battle with a win/loss result on each sid
   assert.equal(pollA.json().result, "loss");
 });
 
+test("spectate needs no uuid and returns both sides' restricted view, no move/trapped detail", async () => {
+  const app = buildApp();
+  const { sessionId } = await createAndJoin(app, [bulbasaur()], [charmander()]);
+  const spectate = await app.inject({ method: "GET", url: `/battles/${sessionId}/spectate` });
+  assert.equal(spectate.statusCode, 200);
+  const body = spectate.json();
+  assert.equal(body.status, "active");
+  assert.deepEqual(Object.keys(body.p1).sort(), ["active", "displayName", "rosterSize"]);
+  assert.equal(body.p1.displayName, "Ash");
+  assert.equal(body.p2.displayName, "Gary");
+  assert.equal(body.p1.active.speciesID, 1, "bulbasaur");
+  assert.equal(body.p2.active.speciesID, 4, "charmander");
+});
+
+test("spectate refuses a battle that hasn't started yet (no opponent joined)", async () => {
+  const app = buildApp();
+  const create = await app.inject({
+    method: "POST",
+    url: "/battles",
+    payload: { uuid: "uuid-a", displayName: "Ash", party: [bulbasaur()] },
+  });
+  const { sessionId } = create.json();
+  const spectate = await app.inject({ method: "GET", url: `/battles/${sessionId}/spectate` });
+  assert.equal(spectate.statusCode, 409);
+});
+
+test("spectate 404s for an unknown session id", async () => {
+  const app = buildApp();
+  const spectate = await app.inject({ method: "GET", url: "/battles/does-not-exist/spectate" });
+  assert.equal(spectate.statusCode, 404);
+});
+
+test("spectate reports the winner as p1/p2 (not win/loss, which only make sense per-participant)", async () => {
+  const app = buildApp();
+  const { sessionId } = await createAndJoin(app, [bulbasaur()], [charizard()]);
+  await app.inject({ method: "POST", url: `/battles/${sessionId}/choose`, payload: { uuid: "uuid-a", choice: "move 1" } });
+  await app.inject({ method: "POST", url: `/battles/${sessionId}/choose`, payload: { uuid: "uuid-b", choice: "move 1" } });
+  const spectate = await app.inject({ method: "GET", url: `/battles/${sessionId}/spectate` });
+  const body = spectate.json();
+  assert.equal(body.status, "completed");
+  assert.equal(body.winner, "p2", "charizard() one-shots bulbasaur() at these levels");
+});
+
+test("a battle is listed as live once joined, and drops off once it finishes", async () => {
+  const app = buildApp();
+  const { sessionId } = await createAndJoin(app, [bulbasaur()], [charizard()], "uuid-live-a", "uuid-live-b");
+
+  const whileActive = await app.inject({ method: "GET", url: "/battles/live" });
+  const activeEntry = (whileActive.json().battles as { sessionId: string; p1DisplayName: string; p2DisplayName: string; turn: number }[])
+    .find((b) => b.sessionId === sessionId);
+  assert.ok(activeEntry, "a just-joined battle should be listed as live");
+  assert.equal(activeEntry!.p1DisplayName, "Ash");
+  assert.equal(activeEntry!.p2DisplayName, "Gary");
+  assert.equal(activeEntry!.turn, 1);
+
+  await app.inject({ method: "POST", url: `/battles/${sessionId}/choose`, payload: { uuid: "uuid-live-a", choice: "move 1" } });
+  await app.inject({ method: "POST", url: `/battles/${sessionId}/choose`, payload: { uuid: "uuid-live-b", choice: "move 1" } });
+
+  const afterFinish = await app.inject({ method: "GET", url: "/battles/live" });
+  assert.ok(!(afterFinish.json().battles as { sessionId: string }[]).some((b) => b.sessionId === sessionId),
+    "a finished battle should no longer be listed as live");
+});
+
+test("a mid-battle forfeit drops the session from the live list immediately", async () => {
+  const app = buildApp();
+  const { sessionId } = await createAndJoin(app, [bulbasaur()], [charmander()], "uuid-live-c", "uuid-live-d");
+  const before = await app.inject({ method: "GET", url: "/battles/live" });
+  assert.ok((before.json().battles as { sessionId: string }[]).some((b) => b.sessionId === sessionId));
+
+  await app.inject({ method: "POST", url: `/battles/${sessionId}/leave`, payload: { uuid: "uuid-live-c" } });
+
+  const after = await app.inject({ method: "GET", url: "/battles/live" });
+  assert.ok(!(after.json().battles as { sessionId: string }[]).some((b) => b.sessionId === sessionId));
+});
+
 test("an open battle is listed for browsing before a join, and drops off after", async () => {
   // The store's open-lobby index is a process/instance-wide singleton (module-level, shared by
   // every test in this run), so assert on presence of this test's own session rather than an
